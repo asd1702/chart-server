@@ -1,0 +1,85 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-architecture_lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-1234}
+      POSTGRES_DB: ${POSTGRES_DB:-architecture_lab}
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-architecture_lab} -d $${POSTGRES_DB:-architecture_lab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  market-ingestor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: market-data-architecture-lab:local
+    command: ["node", "dist/ingestor.js"]
+    environment:
+      NODE_ENV: production
+      LOG_COMPONENT: market-ingestor
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://${POSTGRES_USER:-architecture_lab}:${POSTGRES_PASSWORD:-1234}@timescaledb:5432/${POSTGRES_DB:-architecture_lab}?schema=market}
+      REDIS_URL: redis://redis:6379
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:?TWELVE_DATA_API_KEY is required}
+      STREAM_SYMBOLS: ${STREAM_SYMBOLS:-BTC/USD}
+      ENABLE_HISTORICAL_BACKFILL: ${ENABLE_HISTORICAL_BACKFILL:-false}
+      ROCKSDB_PATH: /data/rocksdb/candles
+    volumes:
+      - candle-rocksdb:/data/rocksdb
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  chart-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: market-data-architecture-lab:local
+    command: ["node", "dist/server.js"]
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+      LOG_COMPONENT: chart-server
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://${POSTGRES_USER:-architecture_lab}:${POSTGRES_PASSWORD:-1234}@timescaledb:5432/${POSTGRES_DB:-architecture_lab}?schema=market}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  timescale-data:
+  redis-data:
+  candle-rocksdb:

@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+
+.env
+.env.*
+!.env.example
+
+npm-debug.log
+*.log
+
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+docs/archive

@@ -1,0 +1,31 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 집계봉(5m, 15m, 1h, 4h, 1d, 1w, 1mo)은 TimescaleDB Continuous Aggregates로 관리됩니다.
+// 애플리케이션에서는 1분봉만 저장하고, 상위 타임프레임은 DB 뷰를 조회합니다.
+// - market.candle_5m
+// - market.candle_15m
+// - market.candle_1h
+// - market.candle_4h
+// - market.candle_1d
+// - market.candle_1w
+// - market.candle_1mo
+
+model Candle1m {
+  time     DateTime @db.Timestamptz
+  symbol   String   @db.VarChar(20)
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   Float
+
+  @@id([time, symbol])
+  @@index([symbol, time(sort: Desc)])
+}
