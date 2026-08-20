@@ -1,5 +1,4 @@
 import { prisma } from '../../shared';
-import { Prisma } from '@prisma/client';
 import { Candle, FormattedCandle } from './candle.types';
 import { DailyTimeframe } from './candle.constants';
 

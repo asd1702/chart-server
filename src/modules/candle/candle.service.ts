@@ -6,7 +6,6 @@ import {
 } from './candle.types';
 import { 
   parseTimeframe, 
-  AGG_TIMEFRAMES, 
   isDailyTimeframe,
   validateTimeframe,
   DailyTimeframe

@@ -1,9 +1,9 @@
 /**
- * PubSub 인터페이스 (추상화 계약서)
- * 
- * 구현체가 무엇이든 (Memory, Redis, Kafka 등) 이 인터페이스만 지키면 교체 가능.
- * - 단일 서버: MemoryPubSubService (EventEmitter)
- * - 멀티 서버: RedisPubSubService (Redis Pub/Sub)
+ * Market event transport contract.
+ *
+ * Market Ingestor는 publisher 역할을 사용하고,
+ * Chart Server는 subscriber 역할을 사용한다.
+ * 현재 split runtime transport는 Redis Pub/Sub이다.
  */
 
 import type { MarketEvent } from '../market-data/market-data.types';
