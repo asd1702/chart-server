@@ -1,8 +1,5 @@
 /**
- * PubSub service factory.
- * 
- * Split runtime always uses Redis as its process boundary. MemoryPubSubService
- * remains available for explicit in-process tests only.
+ * Split runtime uses Redis Pub/Sub as the process boundary.
  */
 
 import type { IPubSubService } from './pubsub.interface';

@@ -1,5 +1,8 @@
 import config from './config';
-import { candleFlusher, closeCandlePersistence } from './modules/candle/candle.persistence';
+import {
+  closeCandlePersistence,
+  startCandlePersistence,
+} from './modules/candle/candle.persistence';
 import { createRedisPubSubService } from './modules/messaging/pubsub.factory';
 import type { MarketEventPublisher } from './modules/messaging/pubsub.interface';
 import {
@@ -27,7 +30,7 @@ export async function startMarketIngestor(): Promise<void> {
   let backfillOperation: Promise<void> = Promise.resolve();
 
   try {
-    candleFlusher.start();
+    startCandlePersistence();
     connectToTwelveData(publisher);
     if (config.market.historicalBackfillEnabled) {
       backfillOperation = runHistoricalBackfill().catch((error) => {

@@ -14,7 +14,6 @@ export const DAILY_TIMEFRAMES = ['1D', '1W', '1M'] as const;
 export type DailyTimeframe = typeof DAILY_TIMEFRAMES[number];
 
 export const VALID_TIMEFRAME_KEYS = [...Object.keys(TIMEFRAME_MAP), ...DAILY_TIMEFRAMES];
-export const AGG_TIMEFRAMES = [5, 15, 60, 240]; // 집계 대상 타임프레임 (분)
 export const AGGREGATE_REFRESH_TIMEFRAMES = [
   '5m',
   '15m',
