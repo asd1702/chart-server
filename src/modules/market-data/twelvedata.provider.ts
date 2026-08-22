@@ -242,3 +242,19 @@ async function publishSafely(
     // failures are intentionally suppressed to avoid tick-level log storms.
   }
 }
+
+export function resetTwelveDataCandleState(): void {
+  candleMakers.clear();
+
+  for(const symbol of SYMBOLS){
+    candleMakers.set(
+      symbol,
+      new CandleMaker(),
+    );
+  }
+
+  logger.info('TwelveData candle state를 초기화했습니다.', {
+    event: 'twelvedata_candle_state_reset',
+    symbols: SYMBOLS,
+  },);
+}
