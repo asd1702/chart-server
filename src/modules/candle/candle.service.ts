@@ -1,4 +1,5 @@
 import { candleRepository } from './candle.repository';
+import type { ContinuousAggregateRefreshResult } from './candle.repository';
 import { 
   CandleResponse, 
   FormattedCandle, 
@@ -119,9 +120,11 @@ export class CandleService {
   /**
    * 모든 CA 뷰를 새로고침 (백필 후 사용)
    */
-  async refreshAllContinuousAggregates(startEpochSec?: number): Promise<void> {
+  async refreshAllContinuousAggregates(
+    startEpochSec?: number,
+  ): Promise<ContinuousAggregateRefreshResult> {
     const fromDate = startEpochSec ? epochToDate(startEpochSec) : undefined;
-    await candleRepository.refreshAllContinuousAggregates(fromDate);
+    return candleRepository.refreshAllContinuousAggregates(fromDate);
   }
 
   /**

@@ -5,6 +5,9 @@ import { ValidationError } from '../../shared/types/common.types';
 import type { MarketEventSubscriber } from '../messaging/pubsub.interface';
 import { InboundSocketMessage } from './realtime.types';
 import type { MarketEvent } from '../market-data/market-data.types';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
+
+const websocketLogger = logger.child({ subsystem: 'websocket' });
 
 interface ClientSubscription {
   symbols: Set<string>;
@@ -62,7 +65,10 @@ export class WebSocketService {
     });
 
     ws.on('error', (error) => {
-      console.error('[Frontend] WebSocket 오류:', error);
+      websocketLogger.warn('클라이언트 WebSocket 오류가 발생했습니다.', {
+        event: 'websocket_client_error',
+        error: getErrorMessage(error),
+      });
     });
   }
 
@@ -191,6 +197,9 @@ export class WebSocketService {
       ws.terminate();
     })));
     this.clients.clear();
+    websocketLogger.info('클라이언트 WebSocket 서버를 중지했습니다.', {
+      event: 'websocket_server_stopped',
+    });
   }
 }
 
@@ -203,6 +212,9 @@ export async function initWebSocketServer(
   webSocketService = new WebSocketService(httpServer);
   await subscriber.subscribe((message) => {
     webSocketService?.broadcastLocal(message);
+  });
+  websocketLogger.info('클라이언트 WebSocket 서버를 시작했습니다.', {
+    event: 'websocket_server_started',
   });
 }
 

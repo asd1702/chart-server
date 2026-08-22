@@ -5,11 +5,20 @@ const mocks = vi.hoisted(() => ({
   queryRaw: vi.fn(),
   getCandles: vi.fn(),
   refreshContinuousAggregate: vi.fn(),
+  logger: {
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  },
 }));
 
 vi.mock('./config', () => ({ default: {} }));
 vi.mock('./shared/db/prisma', () => ({
   prisma: { $queryRaw: mocks.queryRaw },
+}));
+vi.mock('./shared/utils/logger', () => ({
+  getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
+  logger: mocks.logger,
 }));
 vi.mock('./modules/candle/candle.service', () => ({
   candleService: {
@@ -23,7 +32,7 @@ import { createApp } from './app';
 
 describe('Chart Server API', () => {
   beforeEach(() => {
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.clearAllMocks();
     mocks.queryRaw.mockResolvedValue([{ '?column?': 1 }]);
     mocks.getCandles.mockResolvedValue({
       symbol: 'AAPL',
@@ -68,6 +77,29 @@ describe('Chart Server API', () => {
         redis: { status: 'unavailable', role: 'subscriber' },
       },
     });
+  });
+
+  it('logs a database outage and recovery only on health state transitions', async () => {
+    mocks.queryRaw
+      .mockRejectedValueOnce(new Error('database unavailable'))
+      .mockRejectedValueOnce(new Error('database unavailable'))
+      .mockResolvedValueOnce([{ '?column?': 1 }]);
+    const app = createApp();
+
+    await request(app).get('/health').expect(503);
+    await request(app).get('/health').expect(503);
+    await request(app).get('/health').expect(200);
+
+    expect(mocks.logger.warn).toHaveBeenCalledOnce();
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'health_database_unavailable' }),
+    );
+    expect(mocks.logger.info).toHaveBeenCalledOnce();
+    expect(mocks.logger.info).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'health_database_recovered' }),
+    );
   });
 
   it('returns candles from GET /api/candles/:symbol/:timeframe', async () => {

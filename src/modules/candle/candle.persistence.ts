@@ -1,5 +1,5 @@
 import config from '../../config';
-import { logger } from '../../shared/utils/logger';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type { Candle } from './candle.types';
 import { CandleFlusher } from './candle.flusher';
 import { RocksPendingCandleStore } from './storage/rocks-pending-candle.store';
@@ -25,6 +25,11 @@ export function startCandlePersistence(): void {
 
     runtime = { pendingStore, flusher };
     isClosing = false;
+    logger.info('캔들 영속성 계층을 시작했습니다.', {
+      subsystem: 'candle-persistence',
+      event: 'candle_persistence_started',
+      path: config.ROCKSDB_PATH,
+    });
   } catch (error) {
     if (pendingStore) {
       try {
@@ -36,10 +41,11 @@ export function startCandlePersistence(): void {
 
     runtime = null;
     isClosing = false;
-    logger.error('Candle persistence startup failed', {
+    logger.error('캔들 영속성 계층 시작에 실패했습니다.', {
+      subsystem: 'candle-persistence',
       event: 'candle_persistence_start_failed',
       path: config.ROCKSDB_PATH,
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: getErrorMessage(error),
     });
     throw error;
   }
@@ -54,10 +60,12 @@ export function enqueueCandle(candle: Candle): Promise<void> {
   const operation = current.pendingStore.enqueue(candle)
     .then(() => current.flusher.notifyEnqueued())
     .catch((error: unknown) => {
-      logger.error('RocksDB candle enqueue failed', {
+      logger.error('RocksDB pending 캔들 저장에 실패했습니다.', {
+        subsystem: 'candle-persistence',
+        event: 'candle_enqueue_failed',
         symbol: candle.symbol,
         startTime: candle.startTime,
-        error,
+        error: getErrorMessage(error),
       });
       throw error;
     });
@@ -93,7 +101,11 @@ export async function closeCandlePersistence(): Promise<void> {
     }
 
     if (closeError !== undefined) throw closeError;
-    logger.info('Candle pending store closed');
+    logger.info('캔들 pending 저장소를 종료했습니다.', {
+      subsystem: 'candle-persistence',
+      event: 'candle_persistence_stopped',
+      path: config.ROCKSDB_PATH,
+    });
   } finally {
     if (runtime === current) runtime = null;
     activeEnqueues.clear();

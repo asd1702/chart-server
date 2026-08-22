@@ -1,6 +1,12 @@
 import { prisma } from '../../shared';
 import { Candle, FormattedCandle } from './candle.types';
 import { DailyTimeframe } from './candle.constants';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
+
+export interface ContinuousAggregateRefreshResult {
+  succeeded: number;
+  failed: number;
+}
 
 export class CandleRepository {
   /**
@@ -48,7 +54,7 @@ export class CandleRepository {
     }));
   }
 
-  // ✅ findAggCandles는 더 이상 사용하지 않습니다.
+  // findAggCandles는 더 이상 사용하지 않습니다.
   // TimescaleDB Continuous Aggregates 뷰를 직접 조회하는 findContinuousAggCandles를 사용하세요.
 
   /**
@@ -69,7 +75,7 @@ export class CandleRepository {
     const { from, to, limit = 1000, orderDesc = true } = options;
 
     // 타임프레임별 뷰 이름 매핑
-    // ⚠️ SECURITY WARNING: DO NOT use user input directly here.
+    // SECURITY WARNING: DO NOT use user input directly here.
     // viewName MUST be validated through this whitelist mapping.
     // Direct string interpolation of timeframe into SQL would create SQL injection vulnerability.
     const viewMap: Record<number, string> = {
@@ -179,7 +185,7 @@ export class CandleRepository {
     return result.count;
   }
 
-  // ✅ upsertAggCandle 함수는 삭제되었습니다.
+  // upsertAggCandle 함수는 삭제되었습니다.
   // TimescaleDB Continuous Aggregates가 자동으로 집계를 관리합니다.
   // 애플리케이션에서 집계 데이터를 직접 INSERT/UPDATE하지 마세요.
 
@@ -360,17 +366,34 @@ export class CandleRepository {
   /**
    * 모든 CA 뷰를 새로고침
    */
-  async refreshAllContinuousAggregates(fromDate?: Date): Promise<void> {
+  async refreshAllContinuousAggregates(
+    fromDate?: Date,
+  ): Promise<ContinuousAggregateRefreshResult> {
     const timeframes = ['5m', '15m', '1h', '4h', '1D', '1W', '1M'];
+    let succeeded = 0;
+    let failed = 0;
     
     for (const tf of timeframes) {
       try {
         await this.refreshContinuousAggregate(tf, fromDate);
-        console.log(`✅ Refreshed ${tf} CA view`);
+        succeeded += 1;
+        logger.info('Continuous Aggregate 뷰 갱신을 완료했습니다.', {
+          subsystem: 'timescaledb-aggregate',
+          event: 'continuous_aggregate_view_refreshed',
+          timeframe: tf,
+        });
       } catch (error) {
-        console.error(`❌ Failed to refresh ${tf} CA view:`, error);
+        failed += 1;
+        logger.error('Continuous Aggregate 뷰 갱신에 실패했습니다.', {
+          subsystem: 'timescaledb-aggregate',
+          event: 'continuous_aggregate_view_refresh_failed',
+          timeframe: tf,
+          error: getErrorMessage(error),
+        });
       }
     }
+
+    return { succeeded, failed };
   }
 }
 

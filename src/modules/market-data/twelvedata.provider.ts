@@ -3,7 +3,7 @@ import config from '../../config';
 import { CandleMaker } from '../candle/candle.maker';
 import { enqueueCandle } from '../candle/candle.persistence';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
-import { logger } from '../../shared/utils/logger';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type { TwelveDataSubscription } from './market-data.types';
 
 const SYMBOLS = config.market.streamSymbols;
@@ -34,7 +34,8 @@ export function connectToTwelveData(publisher: MarketEventPublisher): void {
   // 기존 연결 정리
   cleanup();
 
-  logger.info('TwelveData WebSocket connecting...', {
+  logger.info('TwelveData WebSocket 연결을 시작합니다.', {
+    subsystem: 'twelvedata-websocket',
     event: 'twelvedata_websocket_connecting',
   });
 
@@ -43,7 +44,8 @@ export function connectToTwelveData(publisher: MarketEventPublisher): void {
   );
 
   tdWs.on('open', () => {
-    logger.info('TwelveData WebSocket connected', {
+    logger.info('TwelveData WebSocket에 연결되었습니다.', {
+      subsystem: 'twelvedata-websocket',
       event: 'twelvedata_websocket_connected',
     });
     lastMessageTime = Date.now();
@@ -52,6 +54,11 @@ export function connectToTwelveData(publisher: MarketEventPublisher): void {
     tdWs?.send(
       JSON.stringify(buildTwelveDataSubscription(SYMBOLS))
     );
+    logger.info('TwelveData 심볼 구독을 요청했습니다.', {
+      subsystem: 'twelvedata-websocket',
+      event: 'twelvedata_subscription_sent',
+      symbols: SYMBOLS,
+    });
   });
 
   tdWs.on('message', (data: WebSocket.RawData) => {
@@ -62,14 +69,16 @@ export function connectToTwelveData(publisher: MarketEventPublisher): void {
   });
 
   tdWs.on('error', (err) => {
-    logger.error('TwelveData WebSocket error', {
+    logger.error('TwelveData WebSocket 오류가 발생했습니다.', {
+      subsystem: 'twelvedata-websocket',
       event: 'twelvedata_websocket_error',
       error: err.message,
     });
   });
 
   tdWs.on('close', (code) => {
-    logger.warn('TwelveData WebSocket closed, reconnecting in 5s', {
+    logger.warn('TwelveData WebSocket 연결이 종료되어 재연결을 예약합니다.', {
+      subsystem: 'twelvedata-websocket',
       event: 'twelvedata_websocket_disconnected',
       code,
       retryAfterMs: 5000,
@@ -100,7 +109,11 @@ function startHeartbeatMonitor() {
     const elapsed = Date.now() - lastMessageTime;
 
     if (elapsed > DISCONNECT_TIMEOUT_MS) {
-      logger.warn('No data received for 60s (Silent Disconnect detected). Reconnecting...', { elapsed });
+      logger.warn('TwelveData 데이터 수신이 중단되어 WebSocket을 재연결합니다.', {
+        subsystem: 'twelvedata-websocket',
+        event: 'twelvedata_websocket_stalled',
+        elapsedMs: elapsed,
+      });
       // 강제 재연결 (기존 소켓 close -> close 이벤트 핸들러가 재연결 트리거)
       if (tdWs) {
         tdWs.terminate(); // 즉시 종료
@@ -154,9 +167,14 @@ export async function handlePriceUpdate(
   if (completedCandle) {
     // RocksDB enqueue 성공 후에만 candle realtime event를 발행한다.
     await publishSafely(publisher, { type: 'candle', timeframe: '1m', candle: completedCandle });
-    logger.debug('1m candle completed', { symbol, time: new Date(completedCandle.startTime * 1000).toISOString() });
+    logger.debug('1분 캔들이 완성되었습니다.', {
+      subsystem: 'twelvedata-websocket',
+      event: 'candle_completed',
+      symbol,
+      time: new Date(completedCandle.startTime * 1000).toISOString(),
+    });
 
-    // ⚠️ 상위 타임프레임 집계는 TimescaleDB Continuous Aggregates가 처리
+    // 상위 타임프레임 집계는 TimescaleDB Continuous Aggregates가 처리
     // 애플리케이션 레벨에서 집계하지 않음 (Race Condition 방지)
   }
 }
@@ -165,10 +183,17 @@ export async function handlePriceUpdate(
  * TwelveData 연결 해제
  */
 export async function disconnectFromTwelveData(): Promise<void> {
+  const wasActive = reconnectEnabled || tdWs !== null || eventPublisher !== null;
   reconnectEnabled = false;
   cleanup();
   await Promise.allSettled(activeMessageHandlers);
   eventPublisher = null;
+  if (wasActive) {
+    logger.info('TwelveData WebSocket 수집을 중지했습니다.', {
+      subsystem: 'twelvedata-websocket',
+      event: 'twelvedata_websocket_stopped',
+    });
+  }
 }
 
 async function processMessage(
@@ -183,16 +208,25 @@ async function processMessage(
       const price = Number(message.price);
       const timestamp = Number(message.timestamp);
       if (!Number.isFinite(price) || !Number.isFinite(timestamp) || timestamp <= 0) {
-        logger.warn('Invalid TwelveData price event ignored', { symbol: message.symbol });
+        logger.warn('유효하지 않은 TwelveData 가격 이벤트를 무시했습니다.', {
+          subsystem: 'twelvedata-websocket',
+          event: 'twelvedata_price_event_invalid',
+          symbol: message.symbol,
+        });
         return;
       }
       await handlePriceUpdate(message.symbol, price, timestamp, publisher);
     } else if (message.event === 'heartbeat') {
-      logger.debug('Received explicit heartbeat');
+      logger.debug('TwelveData heartbeat를 수신했습니다.', {
+        subsystem: 'twelvedata-websocket',
+        event: 'twelvedata_heartbeat_received',
+      });
     }
   } catch (error) {
-    logger.error('TwelveData message processing error', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+    logger.error('TwelveData 메시지 처리에 실패했습니다.', {
+      subsystem: 'twelvedata-websocket',
+      event: 'twelvedata_message_processing_failed',
+      error: getErrorMessage(error),
     });
   }
 }

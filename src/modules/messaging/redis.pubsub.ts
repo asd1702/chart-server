@@ -1,6 +1,6 @@
 import Redis from 'ioredis';
 import config from '../../config';
-import { logger } from '../../shared/utils/logger';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type {
   IPubSubService,
   PubSubConnectionStatus,
@@ -46,7 +46,7 @@ export class RedisPubSubService implements IPubSubService {
 
     this.observeConnection(this.publisher, 'publisher');
     this.observeConnection(this.subscriber, 'subscriber');
-    this.serviceLogger.info('Redis Pub/Sub initialized', {
+    this.serviceLogger.info('Redis Pub/Sub 클라이언트를 초기화했습니다.', {
       event: 'redis_pubsub_initialized',
       role,
     });
@@ -74,7 +74,7 @@ export class RedisPubSubService implements IPubSubService {
     try {
       const count = await this.subscriber.subscribe(this.channel);
       this.markAvailable('subscriber');
-      this.serviceLogger.info('Redis subscription ready', {
+      this.serviceLogger.info('Redis Subscriber 구독이 준비되었습니다.', {
         event: 'redis_subscriber_ready',
         role: 'subscriber',
         subscriptionCount: count,
@@ -89,7 +89,7 @@ export class RedisPubSubService implements IPubSubService {
       try {
         callback(JSON.parse(text) as MarketEvent);
       } catch (error) {
-        this.serviceLogger.error('Redis Pub/Sub message parsing failed', {
+        this.serviceLogger.error('Redis Pub/Sub 메시지 파싱에 실패했습니다.', {
           event: 'redis_message_parse_failed',
           role: 'subscriber',
           error: getErrorMessage(error),
@@ -107,7 +107,7 @@ export class RedisPubSubService implements IPubSubService {
     this.publisher?.disconnect();
     this.states.publisher.available = false;
     this.states.subscriber.available = false;
-    this.serviceLogger.info('Redis Pub/Sub disconnected', {
+    this.serviceLogger.info('Redis Pub/Sub 연결을 종료했습니다.', {
       event: 'redis_pubsub_disconnected',
       role: this.role,
     });
@@ -136,7 +136,9 @@ export class RedisPubSubService implements IPubSubService {
     state.unavailableLogged = false;
 
     this.serviceLogger.info(
-      recovered ? `Redis ${role} recovered` : `Redis ${role} connected`,
+      recovered
+        ? `Redis ${role} 연결이 복구되었습니다.`
+        : `Redis ${role} 연결이 준비되었습니다.`,
       {
         event: recovered
           ? `redis_${role}_recovered`
@@ -152,14 +154,13 @@ export class RedisPubSubService implements IPubSubService {
     if (this.disconnecting || state.unavailableLogged) return;
 
     state.unavailableLogged = true;
-    this.serviceLogger.warn(`Redis ${role} unavailable`, {
-      event: `redis_${role}_unavailable`,
-      role,
-      ...(error === undefined ? {} : { error: getErrorMessage(error) }),
-    });
+    this.serviceLogger.warn(
+      `Redis ${role}를 사용할 수 없어 실시간 전송이 일시 중단됩니다.`,
+      {
+        event: `redis_${role}_unavailable`,
+        role,
+        ...(error === undefined ? {} : { error: getErrorMessage(error) }),
+      },
+    );
   }
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown error';
 }

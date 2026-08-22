@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import apiRoutes from './routes';
 import { errorHandler, notFoundHandler, prisma } from './shared';
-import { logger } from './shared/utils/logger';
+import { getErrorMessage, logger } from './shared/utils/logger';
 import type { PubSubConnectionStatus } from './modules/messaging/pubsub.interface';
 
 interface AppOptions {
@@ -12,6 +12,7 @@ interface AppOptions {
 
 export function createApp(options: AppOptions = {}): Application {
   const app: Application = express();
+  let databaseUnavailableLogged = false;
 
   // ==================== Security Middlewares ====================
 
@@ -69,13 +70,27 @@ export function createApp(options: AppOptions = {}): Application {
         status: 'healthy',
         latency: Date.now() - dbStart,
       };
+      if (databaseUnavailableLogged) {
+        databaseUnavailableLogged = false;
+        logger.info('Health check에서 TimescaleDB 연결 복구를 확인했습니다.', {
+          subsystem: 'health',
+          event: 'health_database_recovered',
+        });
+      }
     } catch (error) {
       health.status = 'degraded';
       health.services.database = {
         status: 'unhealthy',
         error: error instanceof Error ? error.message : 'Unknown error',
       };
-      logger.error('Health check failed: Database', { error });
+      if (!databaseUnavailableLogged) {
+        databaseUnavailableLogged = true;
+        logger.warn('Health check에서 TimescaleDB를 사용할 수 없습니다.', {
+          subsystem: 'health',
+          event: 'health_database_unavailable',
+          error: getErrorMessage(error),
+        });
+      }
     }
 
     // Redis loss degrades realtime delivery but REST/DB serving remains ready.

@@ -9,6 +9,16 @@ import {
   vi,
 } from 'vitest';
 
+vi.mock('../../shared/utils/logger', () => ({
+  getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
+  logger: {
+    child: vi.fn(() => ({
+      info: vi.fn(),
+      warn: vi.fn(),
+    })),
+  },
+}));
+
 import {
   closeWebSocketServer,
   initWebSocketServer,

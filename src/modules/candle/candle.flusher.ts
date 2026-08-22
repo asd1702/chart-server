@@ -1,5 +1,5 @@
 import { prisma } from '../../shared';
-import { logger } from '../../shared/utils/logger';
+import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type { PendingCandleStore } from './storage/pending-candle.store';
 
 interface CandleBatchWriter {
@@ -23,6 +23,8 @@ export interface CandleFlusherOptions {
   writer?: CandleBatchWriter;
 }
 
+type FlushFailureState = 'read' | 'write' | 'ack' | null;
+
 export class CandleFlusher {
   private readonly batchSize: number;
   private readonly flushInterval: number;
@@ -31,6 +33,7 @@ export class CandleFlusher {
   private inFlight: Promise<number> | null = null;
   private enqueuedSinceFlush = 0;
   private stopped = false;
+  private failureState: FlushFailureState = null;
 
   constructor(
     private readonly store: PendingCandleStore,
@@ -49,7 +52,9 @@ export class CandleFlusher {
 
     // Recover pending data promptly after a restart.
     void this.flush();
-    logger.info('CandleFlusher started', {
+    logger.info('캔들 DB 플러셔를 시작했습니다.', {
+      subsystem: 'candle-persistence',
+      event: 'candle_flusher_started',
       batchSize: this.batchSize,
       flushInterval: this.flushInterval,
     });
@@ -82,7 +87,10 @@ export class CandleFlusher {
     }
 
     await this.inFlight;
-    logger.info('CandleFlusher stopped');
+    logger.info('캔들 DB 플러셔를 중지했습니다.', {
+      subsystem: 'candle-persistence',
+      event: 'candle_flusher_stopped',
+    });
   }
 
   private async flushBatch(): Promise<number> {
@@ -92,13 +100,18 @@ export class CandleFlusher {
     try {
       pending = await this.store.peek(this.batchSize);
     } catch (error) {
-      logger.error('RocksDB pending candle read failed', {
+      this.logFailure('read', 'RocksDB pending 캔들 조회에 실패했습니다.', {
+        subsystem: 'candle-persistence',
         event: 'candle_flush_read_failed',
-        error,
+        elapsedMs: Date.now() - startedAt,
+        error: getErrorMessage(error),
       });
       return 0;
     }
-    if (pending.length === 0) return 0;
+    if (pending.length === 0) {
+      this.logRecovery('read');
+      return 0;
+    }
 
     try {
       await this.writer.createMany({
@@ -114,9 +127,12 @@ export class CandleFlusher {
         skipDuplicates: true,
       });
     } catch (error) {
-      logger.error('TimescaleDB candle flush failed; pending candles retained in RocksDB', {
+      this.logFailure('write', '캔들 DB 플러시에 실패했습니다. RocksDB pending 데이터를 유지합니다.', {
+        subsystem: 'candle-persistence',
         event: 'candle_flush_write_failed',
-        error,
+        count: pending.length,
+        elapsedMs: Date.now() - startedAt,
+        error: getErrorMessage(error),
       });
       return 0;
     }
@@ -125,18 +141,54 @@ export class CandleFlusher {
       // ACK only after TimescaleDB has accepted the idempotent batch.
       await this.store.ack(pending.map(({ key }) => key));
     } catch (error) {
-      logger.error('RocksDB candle ACK failed; inserted candles retained for idempotent retry', {
+      this.logFailure('ack', 'RocksDB 캔들 ACK에 실패했습니다. 멱등 재시도를 위해 pending 데이터를 유지합니다.', {
+        subsystem: 'candle-persistence',
         event: 'candle_flush_ack_failed',
-        error,
+        count: pending.length,
+        elapsedMs: Date.now() - startedAt,
+        error: getErrorMessage(error),
       });
       return 0;
     }
 
-    logger.info('Candle flush completed', {
+    this.logRecovery();
+
+    logger.info('캔들 DB 플러시를 완료했습니다.', {
+      subsystem: 'candle-persistence',
       event: 'candle_flush_succeeded',
       count: pending.length,
       elapsedMs: Date.now() - startedAt,
     });
     return pending.length;
+  }
+
+  private logFailure(
+    failure: Exclude<FlushFailureState, null>,
+    message: string,
+    metadata: Record<string, unknown>,
+  ): void {
+    if (this.failureState === failure) return;
+
+    this.failureState = failure;
+    logger.error(message, metadata);
+  }
+
+  private logRecovery(
+    onlyFrom?: Exclude<FlushFailureState, null>,
+  ): void {
+    const recoveredFrom = this.failureState;
+    if (
+      recoveredFrom === null
+      || (onlyFrom !== undefined && recoveredFrom !== onlyFrom)
+    ) {
+      return;
+    }
+
+    this.failureState = null;
+    logger.info('캔들 플러시 파이프라인이 복구되었습니다.', {
+      subsystem: 'candle-persistence',
+      event: 'candle_flush_recovered',
+      recoveredFrom,
+    });
   }
 }

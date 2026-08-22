@@ -100,3 +100,24 @@ export const log = {
   debug: (message: string, meta?: object) => logger.debug(message, meta),
   http: (message: string, meta?: object) => logger.http(message, meta),
 };
+
+/**
+ * 동일 이미지의 서로 다른 entry point가 process component를 명시한다.
+ * Docker의 LOG_COMPONENT가 없어도 이후 module 로그에 process 경계를 남긴다.
+ */
+export function setLogComponent(component: string): void {
+  logger.defaultMeta = {
+    ...logger.defaultMeta,
+    component,
+  };
+}
+
+/**
+ * Error 객체를 nested metadata로 그대로 넘길 때 JSON에서 빈 객체가 되는
+ * 문제를 피하면서 원래 오류 메시지는 보존한다.
+ */
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'Unknown error';
+}

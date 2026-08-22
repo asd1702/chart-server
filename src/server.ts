@@ -5,11 +5,17 @@ import { closeWebSocketServer, initWebSocketServer } from './modules/realtime';
 import { createRedisPubSubService } from './modules/messaging/pubsub.factory';
 import type { MarketEventSubscriber } from './modules/messaging/pubsub.interface';
 import { prisma } from './shared/db/prisma';
-import { logger } from './shared/utils/logger';
+import {
+  getErrorMessage,
+  logger,
+  setLogComponent,
+} from './shared/utils/logger';
 
 const serverLogger = logger.child({ component: 'chart-server' });
 
 export async function startChartServer(): Promise<void> {
+  setLogComponent('chart-server');
+
   const subscriber = createRedisPubSubService('subscriber');
   const httpServer = http.createServer(createApp({
     getRedisSubscriberStatus: () => subscriber.getStatus(),
@@ -23,7 +29,8 @@ export async function startChartServer(): Promise<void> {
     throw error;
   }
 
-  serverLogger.info('Chart Server started', {
+  serverLogger.info('Chart Server 시작을 완료했습니다.', {
+    event: 'chart_server_started',
     port: config.port,
     url: `http://localhost:${config.port}`,
     websocketUrl: `ws://localhost:${config.port}/ws`,
@@ -41,10 +48,15 @@ function installShutdownHandlers(
   const shutdown = async (signal: string): Promise<void> => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    serverLogger.info('Shutdown started', { signal });
+    serverLogger.info('Chart Server 종료 요청을 처리합니다.', {
+      event: 'shutdown_requested',
+      signal,
+    });
 
     const forceExitTimer = setTimeout(() => {
-      serverLogger.error('Graceful shutdown timed out');
+      serverLogger.error('Chart Server 정상 종료 제한 시간을 초과했습니다.', {
+        event: 'shutdown_timed_out',
+      });
       process.exit(1);
     }, 10_000);
     forceExitTimer.unref();
@@ -56,11 +68,14 @@ function installShutdownHandlers(
       await subscriber.disconnect();
       await prisma.$disconnect();
       clearTimeout(forceExitTimer);
-      serverLogger.info('Shutdown completed');
+      serverLogger.info('Chart Server 종료를 완료했습니다.', {
+        event: 'chart_server_stopped',
+      });
       process.exit(0);
     } catch (error) {
-      serverLogger.error('Graceful shutdown failed', {
-        error: error instanceof Error ? error.message : 'Unknown error',
+      serverLogger.error('Chart Server 정상 종료에 실패했습니다.', {
+        event: 'shutdown_failed',
+        error: getErrorMessage(error),
       });
       process.exit(1);
     }
@@ -89,8 +104,9 @@ function closeHttpServer(server: http.Server): Promise<void> {
 
 if (require.main === module) {
   startChartServer().catch(async (error) => {
-    serverLogger.error('Chart Server startup failed', {
-      error: error instanceof Error ? error.message : 'Unknown error',
+    serverLogger.error('Chart Server 시작에 실패했습니다.', {
+      event: 'chart_server_start_failed',
+      error: getErrorMessage(error),
     });
     await prisma.$disconnect();
     process.exit(1);

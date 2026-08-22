@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../types/common.types';
+import { logger } from '../utils/logger';
 
 export function errorHandler(
   err: Error,
@@ -7,11 +8,27 @@ export function errorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  console.error(`[Error] ${err.message}`, {
-    stack: err.stack,
-    path: req.path,
-    method: req.method,
-  });
+  const expectedClientError = err instanceof AppError
+    || err.name === 'PrismaClientKnownRequestError'
+    || err.name === 'ZodError';
+  const logRequestError = expectedClientError
+    ? logger.warn.bind(logger)
+    : logger.error.bind(logger);
+  logRequestError(
+    expectedClientError
+      ? 'HTTP 요청을 처리할 수 없습니다.'
+      : 'HTTP 요청 처리 중 예기치 않은 오류가 발생했습니다.',
+    {
+      subsystem: 'http',
+      event: expectedClientError
+        ? 'http_request_rejected'
+        : 'http_request_failed',
+      error: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+    },
+  );
 
   // AppError (우리가 정의한 에러)
   if (err instanceof AppError) {

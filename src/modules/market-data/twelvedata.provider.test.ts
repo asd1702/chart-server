@@ -23,7 +23,10 @@ vi.mock('../candle/candle.persistence', () => ({
   enqueueCandle: mocks.enqueueCandle,
 }));
 
-vi.mock('../../shared/utils/logger', () => ({ logger: mocks.logger }));
+vi.mock('../../shared/utils/logger', () => ({
+  getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
+  logger: mocks.logger,
+}));
 
 import {
   buildTwelveDataSubscription,

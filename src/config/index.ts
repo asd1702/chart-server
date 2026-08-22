@@ -4,11 +4,13 @@
  * Fail Fast: 필수 환경 변수가 없거나 잘못되면 서버 시작 시 즉시 에러
  */
 
-import { cleanEnv, str, port, bool, url } from 'envalid';
+import { cleanEnv, str, port, bool, url, num } from 'envalid';
 import dotenv from 'dotenv';
 import { DEFAULT_STREAM_SYMBOL, parseStreamSymbols } from './market.config';
 
-dotenv.config();
+// Compose/production 환경 변수와 로컬 .env 로딩을 모두 지원하되,
+// dotenv의 promotional tip은 애플리케이션 운영 로그에서 제외한다.
+dotenv.config({ quiet: true });
 
 // 환경 변수 검증 및 파싱
 const env = cleanEnv(process.env, {
@@ -32,6 +34,9 @@ const env = cleanEnv(process.env, {
   STREAM_SYMBOLS: str({ default: DEFAULT_STREAM_SYMBOL }),
   ENABLE_HISTORICAL_BACKFILL: bool({ default: false }),
 
+  // Leader Election
+  LEADER_ELECTION_LOCK_KEY: num({ default: 424242 }),
+  LEADER_ELECTION_RETRY_MS: num({ default: 1000 }),
   // Durable candle queue
   ROCKSDB_PATH: str({ default: './data/rocksdb/candles' }),
 });
@@ -57,6 +62,11 @@ const config = {
   market: {
     streamSymbols: parseStreamSymbols(env.STREAM_SYMBOLS),
     historicalBackfillEnabled: env.ENABLE_HISTORICAL_BACKFILL,
+  },
+
+  leaderElection: {
+    lockKey: env.LEADER_ELECTION_LOCK_KEY,
+    retryIntervalMs: env.LEADER_ELECTION_RETRY_MS,
   },
 
   // Durable candle queue

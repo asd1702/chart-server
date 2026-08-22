@@ -35,6 +35,7 @@ vi.mock('../../config', () => ({
 
 vi.mock('../../shared/utils/logger', () => ({
   logger: { child: vi.fn(() => mocks.log) },
+  getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
 }));
 
 import { RedisPubSubService } from './redis.pubsub';
@@ -66,7 +67,7 @@ describe('RedisPubSubService logging', () => {
 
     expect(mocks.log.warn).toHaveBeenCalledOnce();
     expect(mocks.log.warn).toHaveBeenCalledWith(
-      'Redis publisher unavailable',
+      expect.any(String),
       expect.objectContaining({ event: 'redis_publisher_unavailable' }),
     );
 
@@ -76,7 +77,7 @@ describe('RedisPubSubService logging', () => {
 
     expect(mocks.log.info).toHaveBeenCalledOnce();
     expect(mocks.log.info).toHaveBeenCalledWith(
-      'Redis publisher recovered',
+      expect.any(String),
       expect.objectContaining({ event: 'redis_publisher_recovered' }),
     );
   });

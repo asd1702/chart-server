@@ -4,6 +4,7 @@ const logger = {
   info: vi.fn(),
   error: vi.fn(),
 };
+const setLogComponent = vi.fn();
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -15,6 +16,8 @@ afterEach(() => {
   vi.doUnmock('../../../src/modules/market-data/twelvedata.provider');
   vi.doUnmock('../../../src/modules/market-data/historical-backfill.service');
   vi.doUnmock('../../../src/modules/candle/candle.persistence');
+  vi.doUnmock('../../../src/modules/coordination/postgres-advisory-leader-election');
+  vi.doUnmock('../../../src/modules/ingestion/active-ingestion.runtime');
   vi.doUnmock('../../../src/shared/db/prisma');
   vi.doUnmock('../../../src/shared/utils/logger');
   vi.resetModules();
@@ -35,7 +38,7 @@ describe('process separation startup', () => {
     };
     const initWebSocketServer = vi.fn().mockResolvedValue(undefined);
     const twelveDataConnect = vi.fn();
-    const candleFlusherStart = vi.fn();
+    const startCandlePersistence = vi.fn();
 
     vi.doMock('http', () => ({
       default: { createServer: vi.fn(() => httpServer) },
@@ -55,13 +58,15 @@ describe('process separation startup', () => {
       connectToTwelveData: twelveDataConnect,
     }));
     vi.doMock('../../../src/modules/candle/candle.persistence', () => ({
-      candleFlusher: { start: candleFlusherStart },
+      startCandlePersistence,
     }));
     vi.doMock('../../../src/shared/db/prisma', () => ({
       prisma: { $disconnect: vi.fn().mockResolvedValue(undefined) },
     }));
     vi.doMock('../../../src/shared/utils/logger', () => ({
+      getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
       logger: { child: vi.fn(() => logger) },
+      setLogComponent,
     }));
     vi.spyOn(process, 'once').mockImplementation(() => process);
 
@@ -71,17 +76,19 @@ describe('process separation startup', () => {
     expect(initWebSocketServer).toHaveBeenCalledWith(httpServer, subscriber);
     expect(httpServer.listen).toHaveBeenCalledWith(8080, expect.any(Function));
     expect(twelveDataConnect).not.toHaveBeenCalled();
-    expect(candleFlusherStart).not.toHaveBeenCalled();
+    expect(startCandlePersistence).not.toHaveBeenCalled();
+    expect(setLogComponent).toHaveBeenCalledWith('chart-server');
   });
 
   it('starts ingestion responsibilities in the Market Ingestor', async () => {
-    const publisher = {
-      publish: vi.fn().mockResolvedValue(undefined),
-      disconnect: vi.fn().mockResolvedValue(undefined),
-    };
-    const candleFlusherStart = vi.fn();
-    const twelveDataConnect = vi.fn();
-    const runHistoricalBackfill = vi.fn().mockResolvedValue(undefined);
+    const activeRuntimeStart = vi.fn().mockResolvedValue(undefined);
+    const activeRuntimeStop = vi.fn().mockResolvedValue(undefined);
+    const electionStart = vi.fn();
+    const electionStop = vi.fn().mockResolvedValue(undefined);
+    let electionOptions: {
+      onLeadershipAcquired?: () => Promise<void>;
+      onLeadershipLost?: (reason: string) => Promise<void>;
+    } | undefined;
 
     vi.doMock('../../../src/config', () => ({
       default: {
@@ -90,43 +97,62 @@ describe('process separation startup', () => {
           streamSymbols: ['BTC/USD'],
           historicalBackfillEnabled: false,
         },
+        DATABASE_URL: 'postgresql://user:password@localhost:5432/lab',
+        leaderElection: {
+          lockKey: 424242,
+          retryIntervalMs: 1000,
+        },
       },
     }));
-    vi.doMock('../../../src/modules/candle/candle.persistence', () => ({
-      candleFlusher: { start: candleFlusherStart },
-      closeCandlePersistence: vi.fn().mockResolvedValue(undefined),
+    vi.doMock('../../../src/modules/ingestion/active-ingestion.runtime', () => ({
+      ActiveIngestionRuntime: class {
+        start = activeRuntimeStart;
+        stop = activeRuntimeStop;
+      },
     }));
-    vi.doMock('../../../src/modules/messaging/pubsub.factory', () => ({
-      createRedisPubSubService: vi.fn(() => publisher),
-    }));
-    vi.doMock('../../../src/modules/market-data/twelvedata.provider', () => ({
-      connectToTwelveData: twelveDataConnect,
-      disconnectFromTwelveData: vi.fn().mockResolvedValue(undefined),
-    }));
-    vi.doMock('../../../src/modules/market-data/historical-backfill.service', () => ({
-      runHistoricalBackfill,
+    vi.doMock('../../../src/modules/coordination/postgres-advisory-leader-election', () => ({
+      LeaderElectionService: class {
+        constructor(options: typeof electionOptions) {
+          electionOptions = options;
+        }
+
+        start = async () => {
+          electionStart();
+          await electionOptions?.onLeadershipAcquired?.();
+        };
+
+        stop = electionStop;
+      },
     }));
     vi.doMock('../../../src/shared/db/prisma', () => ({
       prisma: { $disconnect: vi.fn().mockResolvedValue(undefined) },
     }));
     vi.doMock('../../../src/shared/utils/logger', () => ({
+      getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
       logger: { child: vi.fn(() => logger) },
+      setLogComponent,
     }));
     vi.spyOn(process, 'once').mockImplementation(() => process);
 
     const { startMarketIngestor } = await import('../../../src/ingestor.js');
     await startMarketIngestor();
 
-    expect(candleFlusherStart).toHaveBeenCalledOnce();
-    expect(twelveDataConnect).toHaveBeenCalledWith(publisher);
-    expect(runHistoricalBackfill).not.toHaveBeenCalled();
+    expect(setLogComponent).toHaveBeenCalledWith('market-ingestor');
+    expect(electionStart).toHaveBeenCalledOnce();
+    expect(activeRuntimeStart).toHaveBeenCalledOnce();
+    expect(electionOptions).toEqual(expect.objectContaining({
+      databaseUrl: 'postgresql://user:password@localhost:5432/lab',
+      lockKey: 424242,
+      retryIntervalMs: 1000,
+    }));
     expect(logger.info).toHaveBeenCalledWith(
-      'Market Ingestor configuration loaded',
-      {
+      expect.any(String),
+      expect.objectContaining({
         event: 'ingestor_configuration',
         streamSymbols: ['BTC/USD'],
         historicalBackfillEnabled: false,
-      },
+      }),
     );
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain('test-key');
   });
 });

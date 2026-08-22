@@ -1,6 +1,6 @@
 import Bottleneck from 'bottleneck';
 import axios from 'axios';
-import { logger } from './logger';
+import { getErrorMessage, logger } from './logger';
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_TRANSIENT_RETRIES = 3;
@@ -115,7 +115,7 @@ twelveDataLimiter.on('failed', async (error, jobInfo) => {
 
   if (decision.kind === 'rate_limited') {
     if (decision.cooldownStarted) {
-      rateLimitLogger.warn('TwelveData REST rate limited; global cooldown started', {
+      rateLimitLogger.warn('TwelveData REST 요청 제한으로 전역 cooldown을 시작합니다.', {
         event: 'twelvedata_rate_limited',
         retryAfterMs: decision.retryAfterMs,
         cooldownUntil: new Date(decision.cooldownUntil).toISOString(),
@@ -126,7 +126,7 @@ twelveDataLimiter.on('failed', async (error, jobInfo) => {
   }
 
   if (decision.kind === 'retry') {
-    rateLimitLogger.warn('TwelveData transient request failure; retry scheduled', {
+    rateLimitLogger.warn('TwelveData REST 일시 오류로 재시도를 예약합니다.', {
       event: 'twelvedata_transient_retry',
       retryCount: jobInfo.retryCount,
       retryAfterMs: decision.retryAfterMs,
@@ -155,7 +155,7 @@ export function isTwelveDataRateLimitError(error: unknown): boolean {
 function assertRequestAllowed(): void {
   const { resumed } = requestPolicy.beforeRequest();
   if (resumed) {
-    rateLimitLogger.info('TwelveData REST requests resumed after cooldown', {
+    rateLimitLogger.info('TwelveData REST cooldown이 끝나 요청을 재개합니다.', {
       event: 'twelvedata_rest_resumed',
     });
   }
@@ -210,8 +210,4 @@ function readHeader(headers: unknown, name: string): unknown {
   }
   const record = headers as Record<string, unknown>;
   return record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown error';
 }
