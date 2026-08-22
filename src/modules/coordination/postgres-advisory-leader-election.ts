@@ -16,9 +16,9 @@ const electionLogger = logger.child({
 });
 
 /**
- * Keeps a dedicated PostgreSQL session open while this process owns the
- * advisory lock. It intentionally knows nothing about ingestion resources;
- * the composition root supplies the active/standby lifecycle callbacks.
+ * Owns one dedicated PostgreSQL session for the whole election lifecycle.
+ * In standby, the session polls the advisory lock. Once acquired, that exact
+ * session becomes the session-level lock owner.
  */
 export class LeaderElectionService {
   private readonly databaseUrl: string;
@@ -28,13 +28,13 @@ export class LeaderElectionService {
   private readonly onLeadershipLost: ((reason: string) => Promise<void>) | undefined;
 
   private state: LeaderElectionState = 'stopped';
-  private leaderClient: Client | null = null;
+  private coordinationClient: Client | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private acquisitionInProgress = false;
   private stopped = true;
   private retryDisabled = false;
-  private readonly closedClients = new WeakSet<Client>();
   private standbyAnnounced = false;
+  private readonly closedClients = new WeakSet<Client>();
 
   constructor(options: LeaderElectionOptions) {
     this.databaseUrl = removePrismaOnlyParams(options.databaseUrl);
@@ -71,14 +71,19 @@ export class LeaderElectionService {
     this.stopped = true;
     this.retryDisabled = true;
     this.clearRetryTimer();
+
+    const client = this.coordinationClient;
+    const wasLeader = this.state === 'leader';
+    this.coordinationClient = null;
     this.state = 'stopped';
     this.standbyAnnounced = false;
 
-    const client = this.leaderClient;
-    this.leaderClient = null;
-
     if (client) {
-      await this.releaseAndCloseClient(client);
+      if (wasLeader) {
+        await this.releaseAndCloseClient(client);
+      } else {
+        await this.closeClient(client);
+      }
     }
 
     electionLogger.info('Leader Election을 중지했습니다.', {
@@ -97,19 +102,15 @@ export class LeaderElectionService {
     }
 
     this.acquisitionInProgress = true;
-    const client = new Client({
-      connectionString: this.databaseUrl,
-      application_name: 'market-ingestor-leader-election',
-    });
-    let keepConnection = false;
+    let client: Client | null = null;
 
     try {
+      client = await this.ensureCoordinationClient();
       electionLogger.debug('Leader advisory lock 획득을 시도합니다.', {
         event: 'leader_election_attempt',
         lockKey: this.lockKey,
       });
 
-      await client.connect();
       const result = await client.query<{ acquired: boolean }>(
         'SELECT pg_try_advisory_lock($1) AS acquired',
         [this.lockKey],
@@ -119,30 +120,15 @@ export class LeaderElectionService {
 
       if (result.rows[0]?.acquired !== true) {
         this.state = 'standby';
-
-        if(!this.standbyAnnounced){
-          this.standbyAnnounced = true;
-
-          electionLogger.info('다른 replica가 Leader입니다. Standby로 대기합니다.', {
-            event: 'leader_election_standby',
-            lockKey: this.lockKey,
-          },);
-        } else{
-          electionLogger.debug('Standby 상태에서 Leader ownership 획득을 재시도합니다.', {
-            event: 'leader_election_retry',
-            lockKey: this.lockKey,
-          },);
-        }
-        
+        this.announceStandby();
         return;
       }
 
-      keepConnection = true;
-      this.leaderClient = client;
+      // This same standby session now owns the advisory lock. Do not issue a
+      // second pg_try_advisory_lock call while state is leader: session locks
+      // are re-entrant and would increment the lock count.
       this.state = 'leader';
       this.standbyAnnounced = false;
-      this.installLeaderConnectionHandlers(client);
-
       electionLogger.info('Leader ownership을 획득했습니다.', {
         event: 'leader_election_acquired',
         lockKey: this.lockKey,
@@ -151,32 +137,29 @@ export class LeaderElectionService {
       try {
         await this.onLeadershipAcquired?.();
       } catch (error) {
-        electionLogger.error('Active workload 시작에 실패하여 leadership을 반환합니다.', {
+        electionLogger.error('Leader 획득 후 Active workload 시작에 실패했습니다.', {
           event: 'leader_election_activation_failed',
           lockKey: this.lockKey,
           error: getErrorMessage(error),
         });
-
-        if (this.leaderClient === client) {
-          this.leaderClient = null;
-          this.state = 'standby';
-          await this.releaseAndCloseClient(client);
-          keepConnection = false;
-        }
+        await this.releaseLeadershipAfterActivationFailure(client);
       }
     } catch (error) {
       if (!this.stopped) this.state = 'standby';
+
       electionLogger.warn('Leader Election 시도 중 오류가 발생했습니다.', {
         event: 'leader_election_attempt_failed',
         lockKey: this.lockKey,
         error: getErrorMessage(error),
       });
+
+      // A failed query leaves the session and lock ownership uncertain. Close
+      // it so PostgreSQL is the final authority for cleanup, then reconnect.
+      if (client && this.coordinationClient === client) {
+        await this.closeCoordinationClient(client);
+      }
     } finally {
       this.acquisitionInProgress = false;
-
-      if (!keepConnection) {
-        await this.closeClient(client);
-      }
 
       if (!this.stopped && !this.retryDisabled && this.state !== 'leader') {
         this.scheduleRetry();
@@ -184,31 +167,123 @@ export class LeaderElectionService {
     }
   }
 
-  private installLeaderConnectionHandlers(client: Client): void {
+  private async ensureCoordinationClient(): Promise<Client> {
+    if (this.coordinationClient) return this.coordinationClient;
+
+    const client = new Client({
+      connectionString: this.databaseUrl,
+      application_name: 'market-ingestor-leader-election',
+    });
+
+    try {
+      await client.connect();
+
+      if (this.stopped || this.retryDisabled) {
+        await this.closeClient(client);
+        throw new Error('Leader Election stopped while connecting to PostgreSQL');
+      }
+
+      this.coordinationClient = client;
+      this.installConnectionHandlers(client);
+      electionLogger.info('Leader Election PostgreSQL session을 연결했습니다.', {
+        event: 'leader_election_session_connected',
+        lockKey: this.lockKey,
+      });
+
+      return client;
+    } catch (error) {
+      await this.closeClient(client);
+      throw error;
+    }
+  }
+
+  private announceStandby(): void {
+    if (!this.standbyAnnounced) {
+      this.standbyAnnounced = true;
+      electionLogger.info('다른 replica가 Leader입니다. Standby로 대기합니다.', {
+        event: 'leader_election_standby',
+        lockKey: this.lockKey,
+      });
+      return;
+    }
+
+    electionLogger.debug('Standby 상태에서 Leader ownership 획득을 재시도합니다.', {
+      event: 'leader_election_retry',
+      lockKey: this.lockKey,
+    });
+  }
+
+  private async releaseLeadershipAfterActivationFailure(client: Client): Promise<void> {
+    if (this.coordinationClient !== client) return;
+
+    try {
+      const result = await client.query<{ released: boolean }>(
+        'SELECT pg_advisory_unlock($1) AS released',
+        [this.lockKey],
+      );
+      const released = result.rows[0]?.released === true;
+
+      if (!released) {
+        electionLogger.warn('Leader advisory lock 해제 상태를 확인할 수 없어 coordination session을 종료합니다.', {
+          event: 'leader_election_release_uncertain',
+          lockKey: this.lockKey,
+        });
+        await this.closeCoordinationClient(client);
+        return;
+      }
+
+      electionLogger.info('Active workload 시작 실패로 Leader ownership을 반환했습니다.', {
+        event: 'leader_election_released',
+        lockKey: this.lockKey,
+        released,
+      });
+    } catch (error) {
+      electionLogger.warn('Leader ownership 반환에 실패해 coordination session을 종료합니다.', {
+        event: 'leader_election_release_failed',
+        lockKey: this.lockKey,
+        error: getErrorMessage(error),
+      });
+      await this.closeCoordinationClient(client);
+    } finally {
+      this.state = 'standby';
+      this.standbyAnnounced = false;
+    }
+  }
+
+  private installConnectionHandlers(client: Client): void {
     client.once('error', (error) => {
-      void this.handleLeadershipLost(
+      void this.handleCoordinationConnectionLost(
         client,
         `PostgreSQL connection error: ${getErrorMessage(error)}`,
       );
     });
 
     client.once('end', () => {
-      void this.handleLeadershipLost(client, 'PostgreSQL connection ended');
+      void this.handleCoordinationConnectionLost(client, 'PostgreSQL connection ended');
     });
   }
 
-  private async handleLeadershipLost(client: Client, reason: string): Promise<void> {
-    if (
-      this.stopped ||
-      this.state !== 'leader' ||
-      this.leaderClient !== client
-    ) {
-      return;
-    }
+  private async handleCoordinationConnectionLost(
+    client: Client,
+    reason: string,
+  ): Promise<void> {
+    if (this.stopped || this.coordinationClient !== client) return;
 
-    this.leaderClient = null;
+    this.coordinationClient = null;
+    const wasLeader = this.state === 'leader';
     this.state = 'standby';
     this.standbyAnnounced = false;
+
+    if (!wasLeader) {
+      electionLogger.warn('Standby Leader Election PostgreSQL session을 상실했습니다.', {
+        event: 'leader_election_session_lost',
+        lockKey: this.lockKey,
+        reason,
+      });
+      await this.closeClient(client);
+      if (!this.retryDisabled) this.scheduleRetry();
+      return;
+    }
 
     electionLogger.warn('Leader ownership을 상실했습니다.', {
       event: 'leader_election_lost',
@@ -219,10 +294,8 @@ export class LeaderElectionService {
     try {
       await this.onLeadershipLost?.(reason);
     } catch (error) {
-      // Do not become leader again until an operator resolves uncertainty about
-      // whether the previous active workload actually stopped.
       this.retryDisabled = true;
-      electionLogger.error('Active workload 종료에 실패해 leader 재시도를 중단합니다.', {
+      electionLogger.error('Leadership 상실 후 Active workload 정리에 실패했습니다.', {
         event: 'leader_election_deactivation_failed',
         lockKey: this.lockKey,
         reason,
@@ -280,6 +353,13 @@ export class LeaderElectionService {
     } finally {
       await this.closeClient(client);
     }
+  }
+
+  private async closeCoordinationClient(client: Client): Promise<void> {
+    if (this.coordinationClient === client) {
+      this.coordinationClient = null;
+    }
+    await this.closeClient(client);
   }
 
   private async closeClient(client: Client): Promise<void> {

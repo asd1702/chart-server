@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type ClientEvent = 'error' | 'end';
 
@@ -11,6 +11,7 @@ interface FakeClient {
 
 const mocks = vi.hoisted(() => ({
   acquiredResults: [] as boolean[],
+  releasedResults: [] as boolean[],
   clients: [] as FakeClient[],
   logger: {
     debug: vi.fn(),
@@ -28,7 +29,7 @@ vi.mock('pg', () => ({
       if (statement.includes('pg_try_advisory_lock')) {
         return { rows: [{ acquired: mocks.acquiredResults.shift() ?? false }] };
       }
-      return { rows: [{ released: true }] };
+      return { rows: [{ released: mocks.releasedResults.shift() ?? true }] };
     });
     end = vi.fn().mockResolvedValue(undefined);
 
@@ -59,8 +60,13 @@ import { LeaderElectionService } from './postgres-advisory-leader-election';
 describe('LeaderElectionService', () => {
   beforeEach(() => {
     mocks.acquiredResults.length = 0;
+    mocks.releasedResults.length = 0;
     mocks.clients.length = 0;
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('starts active work only after its dedicated session acquires the lock', async () => {
@@ -89,7 +95,30 @@ describe('LeaderElectionService', () => {
     expect(mocks.clients[0]?.end).toHaveBeenCalledOnce();
   });
 
-  it('releases leadership when active startup fails', async () => {
+  it('reuses the same standby session across polling attempts and promotes it', async () => {
+    vi.useFakeTimers();
+    mocks.acquiredResults.push(false, true);
+    const election = new LeaderElectionService({
+      databaseUrl: 'postgresql://user:password@localhost:5432/lab',
+      lockKey: 42,
+      retryIntervalMs: 1_000,
+    });
+
+    await election.start();
+    expect(election.getState()).toBe('standby');
+    expect(mocks.clients).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(election.getState()).toBe('leader');
+    expect(mocks.clients).toHaveLength(1);
+    expect(mocks.clients[0]?.connect).toHaveBeenCalledOnce();
+    expect(mocks.clients[0]?.query).toHaveBeenCalledTimes(2);
+
+    await election.stop();
+  });
+
+  it('releases leadership after active startup failure but keeps its coordination session', async () => {
     mocks.acquiredResults.push(true);
     const election = new LeaderElectionService({
       databaseUrl: 'postgresql://user:password@localhost:5432/lab',
@@ -105,7 +134,30 @@ describe('LeaderElectionService', () => {
       'SELECT pg_advisory_unlock($1) AS released',
       [42],
     );
+    expect(mocks.clients[0]?.end).not.toHaveBeenCalled();
+
+    await election.stop();
     expect(mocks.clients[0]?.end).toHaveBeenCalledOnce();
+  });
+
+  it('closes the coordination session when activation unlock returns false', async () => {
+    mocks.acquiredResults.push(true);
+    mocks.releasedResults.push(false);
+    const election = new LeaderElectionService({
+      databaseUrl: 'postgresql://user:password@localhost:5432/lab',
+      lockKey: 42,
+      retryIntervalMs: 60_000,
+      onLeadershipAcquired: vi.fn().mockRejectedValue(new Error('RocksDB open failed')),
+    });
+
+    await election.start();
+
+    expect(election.getState()).toBe('standby');
+    expect(mocks.clients[0]?.end).toHaveBeenCalledOnce();
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'leader_election_release_uncertain' }),
+    );
 
     await election.stop();
   });
@@ -129,6 +181,29 @@ describe('LeaderElectionService', () => {
     await vi.waitFor(() => expect(onLeadershipLost).toHaveBeenCalledOnce());
     expect(events).toEqual(['active-stopped']);
     expect(election.getState()).toBe('standby');
+
+    await election.stop();
+  });
+
+  it('reconnects a lost standby session without stopping active work', async () => {
+    mocks.acquiredResults.push(false);
+    const onLeadershipLost = vi.fn().mockResolvedValue(undefined);
+    const election = new LeaderElectionService({
+      databaseUrl: 'postgresql://user:password@localhost:5432/lab',
+      lockKey: 42,
+      retryIntervalMs: 60_000,
+      onLeadershipLost,
+    });
+
+    await election.start();
+    mocks.clients[0]?.emit('error', new Error('standby connection lost'));
+
+    await vi.waitFor(() => expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: 'leader_election_session_lost' }),
+    ));
+    expect(onLeadershipLost).not.toHaveBeenCalled();
+    expect(mocks.clients[0]?.end).toHaveBeenCalledOnce();
 
     await election.stop();
   });
