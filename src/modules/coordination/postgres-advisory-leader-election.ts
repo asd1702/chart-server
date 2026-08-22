@@ -34,6 +34,7 @@ export class LeaderElectionService {
   private stopped = true;
   private retryDisabled = false;
   private readonly closedClients = new WeakSet<Client>();
+  private standbyAnnounced = false;
 
   constructor(options: LeaderElectionOptions) {
     this.databaseUrl = removePrismaOnlyParams(options.databaseUrl);
@@ -52,6 +53,7 @@ export class LeaderElectionService {
 
     this.stopped = false;
     this.retryDisabled = false;
+    this.standbyAnnounced = false;
     this.state = 'standby';
 
     electionLogger.info('Leader Election을 시작합니다.', {
@@ -70,6 +72,7 @@ export class LeaderElectionService {
     this.retryDisabled = true;
     this.clearRetryTimer();
     this.state = 'stopped';
+    this.standbyAnnounced = false;
 
     const client = this.leaderClient;
     this.leaderClient = null;
@@ -116,16 +119,28 @@ export class LeaderElectionService {
 
       if (result.rows[0]?.acquired !== true) {
         this.state = 'standby';
-        electionLogger.info('다른 replica가 Leader입니다. Standby로 대기합니다.', {
-          event: 'leader_election_standby',
-          lockKey: this.lockKey,
-        });
+
+        if(!this.standbyAnnounced){
+          this.standbyAnnounced = true;
+
+          electionLogger.info('다른 replica가 Leader입니다. Standby로 대기합니다.', {
+            event: 'leader_election_standby',
+            lockKey: this.lockKey,
+          },);
+        } else{
+          electionLogger.debug('Standby 상태에서 Leader ownership 획득을 재시도합니다.', {
+            event: 'leader_election_retry',
+            lockKey: this.lockKey,
+          },);
+        }
+        
         return;
       }
 
       keepConnection = true;
       this.leaderClient = client;
       this.state = 'leader';
+      this.standbyAnnounced = false;
       this.installLeaderConnectionHandlers(client);
 
       electionLogger.info('Leader ownership을 획득했습니다.', {
@@ -193,6 +208,7 @@ export class LeaderElectionService {
 
     this.leaderClient = null;
     this.state = 'standby';
+    this.standbyAnnounced = false;
 
     electionLogger.warn('Leader ownership을 상실했습니다.', {
       event: 'leader_election_lost',
