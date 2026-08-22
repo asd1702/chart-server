@@ -7,6 +7,7 @@ import { runHistoricalBackfill } from '../market-data/historical-backfill.servic
 import {
   connectToTwelveData,
   disconnectFromTwelveData,
+  resetTwelveDataCandleState,
 } from '../market-data/twelvedata.provider';
 import { createRedisPubSubService } from '../messaging/pubsub.factory';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
@@ -42,6 +43,7 @@ export class ActiveIngestionRuntime {
     try {
       // Durable storage must be ready before an upstream tick can arrive.
       startCandlePersistence();
+      resetTwelveDataCandleState();
       connectToTwelveData(publisher);
 
       if (config.market.historicalBackfillEnabled) {

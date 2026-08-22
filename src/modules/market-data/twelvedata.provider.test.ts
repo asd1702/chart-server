@@ -31,12 +31,14 @@ vi.mock('../../shared/utils/logger', () => ({
 import {
   buildTwelveDataSubscription,
   handlePriceUpdate,
+  resetTwelveDataCandleState,
 } from './twelvedata.provider';
 
 describe('TwelveData price handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.enqueueCandle.mockResolvedValue(undefined);
+    resetTwelveDataCandleState();
   });
 
   it('persists a completed candle even when Redis publish rejects', async () => {
@@ -135,6 +137,38 @@ describe('TwelveData price handling', () => {
         close: 300,
       }),
     });
+  });
+
+  it('does not carry CandleMaker OHLC state across a leadership reset', async () => {
+    const publisher = {
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+
+    // Epoch 1 has a wide price range but does not complete its minute candle.
+    await handlePriceUpdate('OK/USD', 100, 60, publisher);
+    await handlePriceUpdate('OK/USD', 120, 70, publisher);
+    await handlePriceUpdate('OK/USD', 90, 80, publisher);
+    await handlePriceUpdate('OK/USD', 110, 90, publisher);
+
+    resetTwelveDataCandleState();
+
+    // Epoch 2 must begin from a fresh CandleMaker, not the 120/90 range.
+    await handlePriceUpdate('OK/USD', 105, 120, publisher);
+    await handlePriceUpdate('OK/USD', 106, 130, publisher);
+    await handlePriceUpdate('OK/USD', 104, 140, publisher);
+    await handlePriceUpdate('OK/USD', 105, 150, publisher);
+    await handlePriceUpdate('OK/USD', 107, 180, publisher);
+
+    expect(mocks.enqueueCandle).toHaveBeenCalledOnce();
+    expect(mocks.enqueueCandle).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'OK/USD',
+      startTime: 120,
+      open: 105,
+      high: 106,
+      low: 104,
+      close: 105,
+    }));
   });
 });
 
