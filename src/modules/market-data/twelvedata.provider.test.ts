@@ -30,15 +30,13 @@ vi.mock('../../shared/utils/logger', () => ({
 
 import {
   buildTwelveDataSubscription,
-  handlePriceUpdate,
-  resetTwelveDataCandleState,
+  TwelveDataStream,
 } from './twelvedata.provider';
 
 describe('TwelveData price handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.enqueueCandle.mockResolvedValue(undefined);
-    resetTwelveDataCandleState();
   });
 
   it('persists a completed candle even when Redis publish rejects', async () => {
@@ -53,9 +51,12 @@ describe('TwelveData price handling', () => {
       }),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
+    const stream = new TwelveDataStream(publisher, {
+      symbols: ['FAIL/USD'],
+    });
 
-    await handlePriceUpdate('FAIL/USD', 100, 60, publisher);
-    await handlePriceUpdate('FAIL/USD', 101, 120, publisher);
+    await stream.handlePriceUpdate('FAIL/USD', 100, 60);
+    await stream.handlePriceUpdate('FAIL/USD', 101, 120);
 
     expect(mocks.enqueueCandle).toHaveBeenCalledWith(expect.objectContaining({
       symbol: 'FAIL/USD',
@@ -82,13 +83,16 @@ describe('TwelveData price handling', () => {
         .mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
+    const stream = new TwelveDataStream(publisher, {
+      symbols: ['LATENCY/USD'],
+    });
 
     let firstTickSettled = false;
-    const firstTick = handlePriceUpdate('LATENCY/USD', 200, 60, publisher)
+    const firstTick = stream.handlePriceUpdate('LATENCY/USD', 200, 60)
       .finally(() => {
         firstTickSettled = true;
       });
-    const secondTick = handlePriceUpdate('LATENCY/USD', 201, 120, publisher);
+    const secondTick = stream.handlePriceUpdate('LATENCY/USD', 201, 120);
 
     await vi.waitFor(() => expect(mocks.enqueueCandle).toHaveBeenCalledOnce());
     expect(firstTickSettled).toBe(false);
@@ -102,12 +106,15 @@ describe('TwelveData price handling', () => {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
+    const stream = new TwelveDataStream(publisher, {
+      symbols: ['DURABLE/USD'],
+    });
 
-    await handlePriceUpdate('DURABLE/USD', 250, 60, publisher);
+    await stream.handlePriceUpdate('DURABLE/USD', 250, 60);
     mocks.enqueueCandle.mockRejectedValueOnce(new Error('RocksDB unavailable'));
 
     await expect(
-      handlePriceUpdate('DURABLE/USD', 251, 120, publisher)
+      stream.handlePriceUpdate('DURABLE/USD', 251, 120)
     ).rejects.toThrow('RocksDB unavailable');
     expect(publisher.publish).toHaveBeenCalledTimes(1);
   });
@@ -117,9 +124,12 @@ describe('TwelveData price handling', () => {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
+    const stream = new TwelveDataStream(publisher, {
+      symbols: ['OK/USD'],
+    });
 
-    await handlePriceUpdate('OK/USD', 300, 60, publisher);
-    await handlePriceUpdate('OK/USD', 301, 120, publisher);
+    await stream.handlePriceUpdate('OK/USD', 300, 60);
+    await stream.handlePriceUpdate('OK/USD', 301, 120);
 
     expect(publisher.publish).toHaveBeenNthCalledWith(2, {
       type: 'tick',
@@ -139,26 +149,34 @@ describe('TwelveData price handling', () => {
     });
   });
 
-  it('does not carry CandleMaker OHLC state across a leadership reset', async () => {
-    const publisher = {
+  it('isolates CandleMaker OHLC state between stream instances', async () => {
+    const publisherA = {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
+    const publisherB = {
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    const streamA = new TwelveDataStream(publisherA, {
+      symbols: ['OK/USD'],
+    });
+    const streamB = new TwelveDataStream(publisherB, {
+      symbols: ['OK/USD'],
+    });
 
-    // Epoch 1 has a wide price range but does not complete its minute candle.
-    await handlePriceUpdate('OK/USD', 100, 60, publisher);
-    await handlePriceUpdate('OK/USD', 120, 70, publisher);
-    await handlePriceUpdate('OK/USD', 90, 80, publisher);
-    await handlePriceUpdate('OK/USD', 110, 90, publisher);
+    // Stream A has a wide, incomplete candle range.
+    await streamA.handlePriceUpdate('OK/USD', 100, 60);
+    await streamA.handlePriceUpdate('OK/USD', 120, 70);
+    await streamA.handlePriceUpdate('OK/USD', 90, 80);
+    await streamA.handlePriceUpdate('OK/USD', 110, 90);
 
-    resetTwelveDataCandleState();
-
-    // Epoch 2 must begin from a fresh CandleMaker, not the 120/90 range.
-    await handlePriceUpdate('OK/USD', 105, 120, publisher);
-    await handlePriceUpdate('OK/USD', 106, 130, publisher);
-    await handlePriceUpdate('OK/USD', 104, 140, publisher);
-    await handlePriceUpdate('OK/USD', 105, 150, publisher);
-    await handlePriceUpdate('OK/USD', 107, 180, publisher);
+    // Stream B starts independently and completes its own candle.
+    await streamB.handlePriceUpdate('OK/USD', 105, 120);
+    await streamB.handlePriceUpdate('OK/USD', 106, 130);
+    await streamB.handlePriceUpdate('OK/USD', 104, 140);
+    await streamB.handlePriceUpdate('OK/USD', 105, 150);
+    await streamB.handlePriceUpdate('OK/USD', 107, 180);
 
     expect(mocks.enqueueCandle).toHaveBeenCalledOnce();
     expect(mocks.enqueueCandle).toHaveBeenCalledWith(expect.objectContaining({
@@ -169,6 +187,8 @@ describe('TwelveData price handling', () => {
       low: 104,
       close: 105,
     }));
+    expect(publisherA.publish).toHaveBeenCalledTimes(4);
+    expect(publisherB.publish).toHaveBeenCalledTimes(6);
   });
 });
 
