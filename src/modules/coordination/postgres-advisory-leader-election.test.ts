@@ -207,4 +207,143 @@ describe('LeaderElectionService', () => {
 
     await election.stop();
   });
+
+  it('serializes deactivation behind an in-progress activation when the leader session is lost', async () => {
+    mocks.acquiredResults.push(true);
+
+    const events: string[] = [];
+
+    let finishActivation:
+      | (() => void)
+      | undefined;
+
+    const activationGate =
+      new Promise<void>((resolve) => {
+        finishActivation = resolve;
+      });
+
+    const onLeadershipAcquired =
+      vi.fn(async () => {
+        events.push('activation-started');
+
+        await activationGate;
+
+        events.push('activation-finished');
+      });
+
+    const onLeadershipLost =
+      vi.fn(async () => {
+        events.push('deactivation-started');
+        events.push('deactivation-finished');
+      });
+
+    const election =
+      new LeaderElectionService({
+        databaseUrl:
+          'postgresql://user:password@localhost:5432/lab',
+        lockKey: 42,
+        retryIntervalMs: 60_000,
+        onLeadershipAcquired,
+        onLeadershipLost,
+      });
+
+    /*
+    * start()는 onLeadershipAcquired() 안에서
+    * 의도적으로 막혀 있으므로 아직 await하지 않는다.
+    */
+    const startOperation = election.start();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        'activation-started',
+      ]);
+    });
+
+    expect(election.getState()).toBe(
+      'activating',
+    );
+
+    /*
+    * Active workload가 아직 시작 중인 상태에서
+    * PostgreSQL leadership session을 잃는다.
+    */
+    mocks.clients[0]?.emit(
+      'error',
+      new Error(
+        'connection lost during activation',
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(election.getState()).toBe(
+        'deactivating',
+      );
+    });
+
+    /*
+    * activation이 완료되기 전에는
+    * deactivation callback이 시작되어서는 안 된다.
+    */
+    expect(
+      onLeadershipLost,
+    ).not.toHaveBeenCalled();
+
+    expect(events).toEqual([
+      'activation-started',
+    ]);
+
+    /*
+    * 이제 activation을 완료시킨다.
+    */
+    finishActivation?.();
+
+    await startOperation;
+
+    /*
+    * lifecycle queue 때문에 activation 완료 이후에야
+    * deactivation이 실행되어야 한다.
+    */
+    await vi.waitFor(() => {
+      expect(
+        onLeadershipLost,
+      ).toHaveBeenCalledOnce();
+    });
+
+    expect(events).toEqual([
+      'activation-started',
+      'activation-finished',
+      'deactivation-started',
+      'deactivation-finished',
+    ]);
+
+    /*
+    * 중요:
+    *
+    * onLeadershipLost()가 "호출되었다"는 것과
+    * 전체 connection-loss transition이 "완료되었다"는 것은
+    * 같은 시점이 아니다.
+    *
+    * coordination client cleanup과 state transition까지
+    * 완료될 때까지 기다린다.
+    */
+    await vi.waitFor(() => {
+      expect(election.getState()).toBe(
+        'standby',
+      );
+    });
+
+    expect(
+      mocks.clients[0]?.end,
+    ).toHaveBeenCalledOnce();
+
+    /*
+    * PostgreSQL session을 잃은 stale activation이
+    * 뒤늦게 state를 leader로 되돌리지 않았음을 검증한다.
+    */
+    expect(election.getState()).not.toBe(
+      'leader',
+    );
+
+    await election.stop();
+  });
 });
