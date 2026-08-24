@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const logger = {
   info: vi.fn(),
   error: vi.fn(),
+  warn: vi.fn(),
 };
 const setLogComponent = vi.fn();
 
@@ -88,6 +89,7 @@ describe('process separation startup', () => {
     let electionOptions: {
       onLeadershipAcquired?: () => Promise<void>;
       onLeadershipLost?: (reason: string) => Promise<void>;
+      onFatalError?: (error: Error) => Promise<void>;
     } | undefined;
 
     vi.doMock('../../../src/config', () => ({
@@ -154,5 +156,141 @@ describe('process separation startup', () => {
       }),
     );
     expect(JSON.stringify(logger.info.mock.calls)).not.toContain('test-key');
+  });
+
+  it('terminates the Market Ingestor when leader cleanup reaches a fatal failure', async () => {
+    const activeRuntimeStart =
+      vi.fn().mockResolvedValue(undefined);
+
+    const activeRuntimeStop =
+      vi.fn().mockResolvedValue(undefined);
+
+    let electionOptions: {
+      onLeadershipAcquired?: () => Promise<void>;
+      onLeadershipLost?: (reason: string) => Promise<void>;
+      onFatalError?: (error: Error) => Promise<void>;
+    } | undefined;
+
+    vi.doMock('../../../src/config', () => ({
+      default: {
+        TWELVE_DATA_API_KEY: 'test-key',
+
+        market: {
+          streamSymbols: ['BTC/USD'],
+          historicalBackfillEnabled: false,
+        },
+
+        DATABASE_URL:
+          'postgresql://user:password@localhost:5432/lab',
+
+        leaderElection: {
+          lockKey: 424242,
+          retryIntervalMs: 1000,
+        },
+      },
+    }));
+
+    vi.doMock(
+      '../../../src/modules/ingestion/active-ingestion.runtime',
+      () => ({
+        ActiveIngestionRuntime: class {
+          start = activeRuntimeStart;
+          stop = activeRuntimeStop;
+        },
+      }),
+    );
+
+    vi.doMock(
+      '../../../src/modules/coordination/postgres-advisory-leader-election',
+      () => ({
+        LeaderElectionService: class {
+          constructor(
+            options: typeof electionOptions,
+          ) {
+            electionOptions = options;
+          }
+
+          start = vi.fn().mockResolvedValue(undefined);
+
+          stop = vi.fn().mockResolvedValue(undefined);
+        },
+      }),
+    );
+
+    vi.doMock('../../../src/shared/db/prisma', () => ({
+      prisma: {
+        $disconnect:
+          vi.fn().mockResolvedValue(undefined),
+      },
+    }));
+
+    vi.doMock('../../../src/shared/utils/logger', () => ({
+      getErrorMessage: (error: unknown) =>
+        error instanceof Error
+          ? error.message
+          : 'Unknown error',
+
+      logger: {
+        child: vi.fn(() => logger),
+      },
+
+      setLogComponent,
+    }));
+
+    /*
+    * installShutdownHandlers()가 signal handler를
+    * 실제 process에 등록하지 않도록 막는다.
+    */
+    vi.spyOn(process, 'once')
+      .mockImplementation(() => process);
+
+    /*
+    * 실제 테스트 프로세스가 종료되면 안 되므로
+    * process.exit()만 spy로 대체한다.
+    */
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(
+        (() => undefined) as () => never,
+      );
+
+    const { startMarketIngestor } =
+      await import('../../../src/ingestor.js');
+
+    await startMarketIngestor();
+
+    expect(electionOptions?.onFatalError).toEqual(
+      expect.any(Function),
+    );
+
+    const fatalError =
+      new Error('RocksDB close failed');
+
+    await electionOptions?.onFatalError?.(
+      fatalError,
+    );
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        event:
+          'ingestor_fatal_leadership_cleanup_failure',
+        error: 'RocksDB close failed',
+      }),
+    );
+
+    expect(exitSpy).toHaveBeenCalledOnce();
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+
+    /*
+    * Fatal policy는 graceful shutdown을 다시 실행하는
+    * 경로가 아니다.
+    *
+    * ActiveIngestionRuntime.stop()은 이미
+    * LeaderElectionService의 onLeadershipLost 경로에서
+    * 실패한 뒤 fatal callback까지 도달했다고 가정한다.
+    */
+    expect(activeRuntimeStop).not.toHaveBeenCalled();
   });
 });
