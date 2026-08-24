@@ -145,4 +145,27 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
     expect(mocks.streamStart).not.toHaveBeenCalled();
   });
 
+  it('cleans the partially started stream before Kafka when TwelveData startup fails', async () => {
+    mocks.streamStart.mockImplementationOnce(() => {
+      mocks.calls.push('stream-start');
+      throw new Error('TwelveData start failed');
+    });
+    const runtime = new ActiveIngestionRuntime();
+
+    await expect(runtime.start()).rejects.toThrow('TwelveData start failed');
+
+    expect(mocks.calls).toEqual([
+      'redis-created',
+      'candle-persistence-start',
+      'kafka-created',
+      'kafka-start',
+      'stream-created',
+      'stream-start',
+      'stream-stop',
+      'kafka-stop',
+      'candle-persistence-stop',
+      'redis-stop',
+    ]);
+  });
+
 });

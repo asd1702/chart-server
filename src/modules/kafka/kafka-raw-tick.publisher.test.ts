@@ -58,6 +58,7 @@ describe('KafkaRawTickPublisher', () => {
       },
     });
     expect(mocks.producer).toHaveBeenCalledWith({
+      'linger.ms': 0,
       kafkaJS: {
         acks: -1,
         idempotent: true,

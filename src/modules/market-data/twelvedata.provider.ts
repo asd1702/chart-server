@@ -28,6 +28,9 @@ export class TwelveDataStream {
   private readonly activeMessageHandlers =
     new Set<Promise<void>>();
 
+  private readonly symbolDurableTails =
+    new Map<string, Promise<void>>();
+
   private ws: WebSocket | null = null;
 
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -106,23 +109,31 @@ export class TwelveDataStream {
       source: 'twelvedata',
     };
 
-    /*
-     * Kafka acknowledgement is the admission gate for the legacy path.
-     * A tick that did not reach the durable raw log must not mutate the
-     * epoch-local CandleMaker state or reach RocksDB/Redis.
-     */
-    await this.rawTickPublisher.publish(rawTick);
+    const completedCandle =
+      await this.runSymbolDurablePhase(
+        symbol,
+        async () => {
+          /*
+           * Kafka acknowledgement is the admission gate for the legacy path.
+           * A tick that did not reach the durable raw log must not mutate the
+           * epoch-local CandleMaker state or reach RocksDB/Redis.
+           */
+          await this.rawTickPublisher.publish(rawTick);
 
-    const completedCandle = maker.update(
-      symbol,
-      price,
-      0,
-      timestamp,
-    );
+          const completed = maker.update(
+            symbol,
+            price,
+            0,
+            timestamp,
+          );
 
-    if (completedCandle) {
-      await enqueueCandle(completedCandle);
-    }
+          if (completed) {
+            await enqueueCandle(completed);
+          }
+
+          return completed;
+        },
+      );
 
     // Tick은 durability 대상이 아닌
     // best-effort realtime event다.
@@ -160,6 +171,35 @@ export class TwelveDataStream {
         },
       );
     }
+  }
+
+  private runSymbolDurablePhase<T>(
+    symbol: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previousTail =
+      this.symbolDurableTails.get(symbol)
+      ?? Promise.resolve();
+
+    const result = previousTail.then(operation);
+
+    /*
+     * Queue tails resolve after failures so a rejected tick does not block
+     * subsequent ticks for the same symbol. The original result still
+     * propagates its failure to the caller.
+     */
+    const currentTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    this.symbolDurableTails.set(symbol, currentTail);
+
+    return result.finally(() => {
+      if (this.symbolDurableTails.get(symbol) === currentTail) {
+        this.symbolDurableTails.delete(symbol);
+      }
+    });
   }
 
   private connectWebSocket(): void {
