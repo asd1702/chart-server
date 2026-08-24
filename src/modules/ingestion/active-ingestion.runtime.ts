@@ -3,6 +3,8 @@ import {
   closeCandlePersistence,
   startCandlePersistence,
 } from '../candle/candle.persistence';
+import { KafkaRawTickPublisher } from '../kafka/kafka-raw-tick.publisher';
+import type { RawTickPublisher } from '../kafka/raw-tick.publisher';
 import { runHistoricalBackfill } from '../market-data/historical-backfill.service';
 import { TwelveDataStream } from '../market-data/twelvedata.provider';
 import { createRedisPubSubService } from '../messaging/pubsub.factory';
@@ -19,6 +21,8 @@ const runtimeLogger = logger.child({
  */
 export class ActiveIngestionRuntime {
   private publisher: MarketEventPublisher | null = null;
+
+  private rawTickPublisher: RawTickPublisher | null = null;
 
   private twelveDataStream: TwelveDataStream | null = null;
 
@@ -55,6 +59,21 @@ export class ActiveIngestionRuntime {
       startCandlePersistence();
 
       /*
+       * WebSocket보다 먼저 Kafka producer를 준비한다.
+       * TwelveDataStream은 Kafka ACK 전에는 CandleMaker를 전진시키지
+       * 않으므로, producer connection 실패 시 upstream을 열지 않는다.
+       */
+      const rawTickPublisher = new KafkaRawTickPublisher(
+        [...config.kafka.brokers],
+        config.kafka.rawTicksTopic,
+        config.kafka.clientId,
+      );
+
+      this.rawTickPublisher = rawTickPublisher;
+
+      await rawTickPublisher.start();
+
+      /*
        * 하나의 Active Leadership Epoch마다
        * 새로운 TwelveDataStream instance를 생성한다.
        *
@@ -64,6 +83,7 @@ export class ActiveIngestionRuntime {
        */
       const twelveDataStream = new TwelveDataStream(
         publisher,
+        rawTickPublisher,
         {
           symbols: config.market.streamSymbols,
         },
@@ -109,6 +129,7 @@ export class ActiveIngestionRuntime {
     if (
       !this.running &&
       !this.publisher &&
+      !this.rawTickPublisher &&
       !this.twelveDataStream
     ) {
       return;
@@ -128,9 +149,11 @@ export class ActiveIngestionRuntime {
      * 다시 정상 resource처럼 보유하지 않도록 한다.
      */
     const twelveDataStream = this.twelveDataStream;
+    const rawTickPublisher = this.rawTickPublisher;
     const publisher = this.publisher;
 
     this.twelveDataStream = null;
+    this.rawTickPublisher = null;
     this.publisher = null;
 
     let firstError: unknown;
@@ -170,7 +193,19 @@ export class ActiveIngestionRuntime {
     }
 
     /*
-     * 3. 더 이상 새로운 tick handler가 RocksDB에 접근하지 않는
+     * 3. 모든 active message handler가 settle된 뒤 Kafka producer를
+     * 종료한다. send() 중 disconnect되는 race를 방지한다.
+     */
+    if (rawTickPublisher) {
+      try {
+        await rawTickPublisher.stop();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+
+    /*
+     * 4. 더 이상 새로운 tick handler가 RocksDB에 접근하지 않는
      * 상태가 된 후 persistence를 닫는다.
      */
     try {
@@ -180,7 +215,7 @@ export class ActiveIngestionRuntime {
     }
 
     /*
-     * 4. 마지막으로 realtime publisher를 종료한다.
+     * 5. 마지막으로 realtime publisher를 종료한다.
      */
     if (publisher) {
       try {
@@ -213,8 +248,10 @@ export class ActiveIngestionRuntime {
     this.running = false;
 
     const twelveDataStream = this.twelveDataStream;
+    const rawTickPublisher = this.rawTickPublisher;
 
     this.twelveDataStream = null;
+    this.rawTickPublisher = null;
     this.publisher = null;
     this.backfillOperation = Promise.resolve();
 
@@ -224,6 +261,14 @@ export class ActiveIngestionRuntime {
      */
     if (twelveDataStream) {
       await twelveDataStream.stop().catch(() => undefined);
+    }
+
+    /*
+     * Stream handler가 모두 정리된 뒤 producer를 종료한다.
+     * connect()가 실패한 publisher도 best-effort disconnect한다.
+     */
+    if (rawTickPublisher) {
+      await rawTickPublisher.stop().catch(() => undefined);
     }
 
     /*

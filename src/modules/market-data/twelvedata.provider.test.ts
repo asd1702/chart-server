@@ -33,6 +33,26 @@ import {
   TwelveDataStream,
 } from './twelvedata.provider';
 
+function createRawTickPublisher() {
+  return {
+    start: vi.fn().mockResolvedValue(undefined),
+    publish: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function createDeferred() {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, reject, resolve };
+}
+
 describe('TwelveData price handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,7 +71,11 @@ describe('TwelveData price handling', () => {
       }),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
-    const stream = new TwelveDataStream(publisher, {
+    const rawTickPublisher = createRawTickPublisher();
+    rawTickPublisher.publish.mockImplementation(async () => {
+      calls.push('raw-tick-publish');
+    });
+    const stream = new TwelveDataStream(publisher, rawTickPublisher, {
       symbols: ['FAIL/USD'],
     });
 
@@ -64,7 +88,9 @@ describe('TwelveData price handling', () => {
       close: 100,
     }));
     expect(calls).toEqual([
+      'raw-tick-publish',
       'publish:tick',
+      'raw-tick-publish',
       'enqueue',
       'publish:tick',
       'publish:candle',
@@ -83,9 +109,13 @@ describe('TwelveData price handling', () => {
         .mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
-    const stream = new TwelveDataStream(publisher, {
+    const stream = new TwelveDataStream(
+      publisher,
+      createRawTickPublisher(),
+      {
       symbols: ['LATENCY/USD'],
-    });
+      },
+    );
 
     let firstTickSettled = false;
     const firstTick = stream.handlePriceUpdate('LATENCY/USD', 200, 60)
@@ -101,14 +131,108 @@ describe('TwelveData price handling', () => {
     await Promise.all([firstTick, secondTick]);
   });
 
+  it('serializes the Kafka-to-RocksDB durable phase for the same symbol', async () => {
+    const firstKafkaAck = createDeferred();
+    const calls: string[] = [];
+    const rawTickPublisher = createRawTickPublisher();
+    rawTickPublisher.publish
+      .mockImplementationOnce(async () => {
+        calls.push('kafka:A:start');
+        await firstKafkaAck.promise;
+        calls.push('kafka:A:ack');
+      })
+      .mockImplementationOnce(async () => {
+        calls.push('kafka:B:start');
+      });
+    mocks.enqueueCandle.mockImplementation(async (candle) => {
+      calls.push(`enqueue:${candle.startTime}`);
+    });
+    const publisher = {
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    const stream = new TwelveDataStream(publisher, rawTickPublisher, {
+      symbols: ['BTC/USD'],
+    });
+
+    const first = stream.handlePriceUpdate('BTC/USD', 100, 60);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledTimes(1);
+    });
+
+    const second = stream.handlePriceUpdate('BTC/USD', 101, 120);
+
+    await Promise.resolve();
+
+    expect(rawTickPublisher.publish).toHaveBeenCalledTimes(1);
+    expect(mocks.enqueueCandle).not.toHaveBeenCalled();
+
+    firstKafkaAck.resolve();
+
+    await Promise.all([first, second]);
+
+    expect(rawTickPublisher.publish).toHaveBeenCalledTimes(2);
+    expect(mocks.enqueueCandle).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'BTC/USD',
+      startTime: 60,
+      open: 100,
+      close: 100,
+    }));
+    expect(calls.indexOf('kafka:A:ack')).toBeLessThan(
+      calls.indexOf('kafka:B:start'),
+    );
+  });
+
+  it('does not serialize durable processing across different symbols', async () => {
+    const btcKafkaAck = createDeferred();
+    const rawTickPublisher = createRawTickPublisher();
+    rawTickPublisher.publish.mockImplementation(async (tick) => {
+      if (tick.symbol === 'BTC/USD') {
+        await btcKafkaAck.promise;
+      }
+    });
+    const publisher = {
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    const stream = new TwelveDataStream(publisher, rawTickPublisher, {
+      symbols: ['BTC/USD', 'ETH/USD'],
+    });
+
+    const btc = stream.handlePriceUpdate('BTC/USD', 100, 60);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledTimes(1);
+    });
+
+    const eth = stream.handlePriceUpdate('ETH/USD', 200, 60);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledTimes(2);
+    });
+
+    expect(rawTickPublisher.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'ETH/USD' }),
+    );
+
+    btcKafkaAck.resolve();
+
+    await Promise.all([btc, eth]);
+  });
+
   it('does not treat a durability failure as a best-effort publish failure', async () => {
     const publisher = {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
-    const stream = new TwelveDataStream(publisher, {
+    const stream = new TwelveDataStream(
+      publisher,
+      createRawTickPublisher(),
+      {
       symbols: ['DURABLE/USD'],
-    });
+      },
+    );
 
     await stream.handlePriceUpdate('DURABLE/USD', 250, 60);
     mocks.enqueueCandle.mockRejectedValueOnce(new Error('RocksDB unavailable'));
@@ -124,7 +248,8 @@ describe('TwelveData price handling', () => {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
-    const stream = new TwelveDataStream(publisher, {
+    const rawTickPublisher = createRawTickPublisher();
+    const stream = new TwelveDataStream(publisher, rawTickPublisher, {
       symbols: ['OK/USD'],
     });
 
@@ -147,6 +272,45 @@ describe('TwelveData price handling', () => {
         close: 300,
       }),
     });
+    expect(rawTickPublisher.publish).toHaveBeenNthCalledWith(1, {
+      schemaVersion: 1,
+      symbol: 'OK/USD',
+      price: 300,
+      providerTimestampSec: 60,
+      receivedAtMs: expect.any(Number),
+      source: 'twelvedata',
+    });
+  });
+
+  it('does not advance CandleMaker or publish realtime events when Kafka rejects a tick', async () => {
+    const publisher = {
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    const rawTickPublisher = createRawTickPublisher();
+    rawTickPublisher.publish.mockRejectedValueOnce(
+      new Error('Kafka unavailable'),
+    );
+    const stream = new TwelveDataStream(publisher, rawTickPublisher, {
+      symbols: ['BTC/USD'],
+    });
+
+    await expect(
+      stream.handlePriceUpdate('BTC/USD', 100, 60),
+    ).rejects.toThrow('Kafka unavailable');
+
+    expect(mocks.enqueueCandle).not.toHaveBeenCalled();
+    expect(publisher.publish).not.toHaveBeenCalled();
+
+    await stream.handlePriceUpdate('BTC/USD', 101, 120);
+    await stream.handlePriceUpdate('BTC/USD', 102, 180);
+
+    expect(mocks.enqueueCandle).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'BTC/USD',
+      startTime: 120,
+      open: 101,
+    }));
+    expect(rawTickPublisher.publish).toHaveBeenCalledTimes(3);
   });
 
   it('isolates CandleMaker OHLC state between stream instances', async () => {
@@ -158,12 +322,20 @@ describe('TwelveData price handling', () => {
       publish: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
     };
-    const streamA = new TwelveDataStream(publisherA, {
+    const streamA = new TwelveDataStream(
+      publisherA,
+      createRawTickPublisher(),
+      {
       symbols: ['OK/USD'],
-    });
-    const streamB = new TwelveDataStream(publisherB, {
+      },
+    );
+    const streamB = new TwelveDataStream(
+      publisherB,
+      createRawTickPublisher(),
+      {
       symbols: ['OK/USD'],
-    });
+      },
+    );
 
     // Stream A has a wide, incomplete candle range.
     await streamA.handlePriceUpdate('OK/USD', 100, 60);
