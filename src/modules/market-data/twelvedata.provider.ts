@@ -2,9 +2,11 @@ import WebSocket from 'ws';
 import config from '../../config';
 import { CandleMaker } from '../candle/candle.maker';
 import { enqueueCandle } from '../candle/candle.persistence';
+import type { RawTickPublisher } from '../kafka/raw-tick.publisher';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
 import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type { TwelveDataSubscription } from './market-data.types';
+import type { RawMarketTick } from './raw-market-tick';
 
 
 const HEARTBEAT_CHECK_MS = 30_000;
@@ -17,6 +19,7 @@ export interface TwelveDataStreamOptions {
 
 export class TwelveDataStream {
   private readonly publisher: MarketEventPublisher;
+  private readonly rawTickPublisher: RawTickPublisher;
   private readonly symbols: readonly string[];
 
   private readonly candleMakers =
@@ -37,9 +40,11 @@ export class TwelveDataStream {
 
   constructor(
     publisher: MarketEventPublisher,
+    rawTickPublisher: RawTickPublisher,
     options: TwelveDataStreamOptions,
   ) {
     this.publisher = publisher;
+    this.rawTickPublisher = rawTickPublisher;
     this.symbols = [...options.symbols];
 
     for (const symbol of this.symbols) {
@@ -92,16 +97,29 @@ export class TwelveDataStream {
       return;
     }
 
-    const completedCandle =
-      maker.update(
-        symbol,
-        price,
-        0,
-        timestamp,
-      );
+    const rawTick: RawMarketTick = {
+      schemaVersion: 1,
+      symbol,
+      price,
+      providerTimestampSec: timestamp,
+      receivedAtMs: Date.now(),
+      source: 'twelvedata',
+    };
 
-    // 완성된 candle은 realtime delivery보다
-    // durability를 먼저 확보한다.
+    /*
+     * Kafka acknowledgement is the admission gate for the legacy path.
+     * A tick that did not reach the durable raw log must not mutate the
+     * epoch-local CandleMaker state or reach RocksDB/Redis.
+     */
+    await this.rawTickPublisher.publish(rawTick);
+
+    const completedCandle = maker.update(
+      symbol,
+      price,
+      0,
+      timestamp,
+    );
+
     if (completedCandle) {
       await enqueueCandle(completedCandle);
     }

@@ -29,6 +29,7 @@
   "license": "ISC",
   "description": "Failure-recovery lab for durable market-data ingestion and realtime fan-out",
   "dependencies": {
+    "@confluentinc/kafka-javascript": "^1.10.0",
     "@harperfast/rocksdb-js": "^1.5.0",
     "@prisma/client": "^6.19.3",
     "axios": "^1.18.1",
