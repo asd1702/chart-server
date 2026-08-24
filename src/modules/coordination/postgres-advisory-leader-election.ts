@@ -6,7 +6,8 @@ export type LeaderElectionState =
   | 'standby'
   | 'activating'
   | 'leader'
-  | 'deactivating';
+  | 'deactivating'
+  | 'failed';
 
 export interface LeaderElectionOptions {
   databaseUrl: string;
@@ -14,6 +15,7 @@ export interface LeaderElectionOptions {
   retryIntervalMs?: number;
   onLeadershipAcquired?: () => Promise<void>;
   onLeadershipLost?: (reason: string) => Promise<void>;
+  onFatalError?: (error: Error) => Promise<void>;
 }
 
 const electionLogger = logger.child({
@@ -31,6 +33,7 @@ export class LeaderElectionService {
   private readonly retryIntervalMs: number;
   private readonly onLeadershipAcquired: (() => Promise<void>) | undefined;
   private readonly onLeadershipLost: ((reason: string) => Promise<void>) | undefined;
+ private readonly onFatalError:| ((error: Error) => Promise<void>) | undefined;
 
   private state: LeaderElectionState = 'stopped';
   private coordinationClient: Client | null = null;
@@ -61,6 +64,7 @@ export class LeaderElectionService {
     this.retryIntervalMs = options.retryIntervalMs ?? 1_000;
     this.onLeadershipAcquired = options.onLeadershipAcquired;
     this.onLeadershipLost = options.onLeadershipLost;
+    this.onFatalError = options.onFatalError;
   }
 
   getState(): LeaderElectionState {
@@ -489,6 +493,8 @@ export class LeaderElectionService {
       reason,
     });
 
+    let deactivationError: unknown;
+
     try {
       await this.runLifecycleTransition(async () => {
         await this.onLeadershipLost?.(reason);
@@ -500,7 +506,23 @@ export class LeaderElectionService {
       * We cannot prove that the old Active workload was fully stopped,
       * so this process must not attempt to become leader again.
       */
+      deactivationError = error;
+    } finally {
+      await this.closeClient(client);
+    }
+
+    if (deactivationError !== undefined) {
       this.retryDisabled = true;
+      this.state = 'failed';
+
+      const fatalError =
+        deactivationError instanceof Error
+          ? deactivationError
+          : new Error(
+              `Leadership deactivation failed: ${getErrorMessage(
+                deactivationError,
+              )}`,
+            );
 
       electionLogger.error(
         'Leadership 상실 후 Active workload 정리에 실패했습니다.',
@@ -508,13 +530,24 @@ export class LeaderElectionService {
           event: 'leader_election_deactivation_failed',
           lockKey: this.lockKey,
           reason,
-          error: getErrorMessage(error),
+          error: getErrorMessage(deactivationError),
         },
       );
 
+      try {
+        await this.onFatalError?.(fatalError);
+      } catch (fatalHandlerError) {
+        electionLogger.error(
+          'Leader Election fatal error handler 실행에 실패했습니다.',
+          {
+            event: 'leader_election_fatal_handler_failed',
+            lockKey: this.lockKey,
+            error: getErrorMessage(fatalHandlerError),
+          },
+        );
+      }
+
       return;
-    } finally {
-      await this.closeClient(client);
     }
 
     if (this.stopped) {

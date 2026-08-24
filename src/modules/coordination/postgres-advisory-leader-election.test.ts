@@ -346,4 +346,65 @@ describe('LeaderElectionService', () => {
 
     await election.stop();
   });
+
+  it('enters a terminal failed state and reports a fatal error when deactivation fails', async () => {
+    vi.useFakeTimers();
+
+    mocks.acquiredResults.push(true);
+
+    const onLeadershipLost =
+      vi.fn().mockRejectedValue(
+        new Error('RocksDB close failed'),
+      );
+
+    const onFatalError =
+      vi.fn().mockResolvedValue(undefined);
+
+    const election =
+      new LeaderElectionService({
+        databaseUrl:
+          'postgresql://user:password@localhost:5432/lab',
+        lockKey: 42,
+        retryIntervalMs: 1_000,
+        onLeadershipLost,
+        onFatalError,
+      });
+
+    await election.start();
+
+    expect(election.getState()).toBe('leader');
+
+    mocks.clients[0]?.emit(
+      'error',
+      new Error('connection lost'),
+    );
+
+    await vi.waitFor(() => {
+      expect(onFatalError).toHaveBeenCalledOnce();
+    });
+
+    expect(onLeadershipLost).toHaveBeenCalledOnce();
+
+    expect(onFatalError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'RocksDB close failed',
+      }),
+    );
+
+    expect(election.getState()).toBe('failed');
+
+    expect(
+      mocks.clients[0]?.end,
+    ).toHaveBeenCalledOnce();
+
+    /*
+    * Even if retry time passes, a terminally failed process
+    * must never participate in leader election again.
+    */
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(mocks.clients).toHaveLength(1);
+
+    await election.stop();
+  });
 });
