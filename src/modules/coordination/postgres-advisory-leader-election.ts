@@ -33,7 +33,7 @@ export class LeaderElectionService {
   private readonly retryIntervalMs: number;
   private readonly onLeadershipAcquired: (() => Promise<void>) | undefined;
   private readonly onLeadershipLost: ((reason: string) => Promise<void>) | undefined;
- private readonly onFatalError:| ((error: Error) => Promise<void>) | undefined;
+ private readonly onFatalError: ((error: Error) => Promise<void>) | undefined;
 
   private state: LeaderElectionState = 'stopped';
   private coordinationClient: Client | null = null;
