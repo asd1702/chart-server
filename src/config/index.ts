@@ -30,6 +30,18 @@ const env = cleanEnv(process.env, {
   KAFKA_RAW_TICKS_TOPIC: str({ default: 'market.raw-ticks' }),
 
   KAFKA_CLIENT_ID: str({ default: 'market-feed-ingestor' }),
+
+  KAFKA_CANDLE_CONSUMER_GROUP: str({
+    default: 'candle-processor-v1',
+  }),
+
+  KAFKA_CANDLE_CONSUMER_CLIENT_ID: str({
+    default: 'candle-processor',
+  }),
+
+  CANDLE_PROCESSOR_SYMBOLS: str({
+    default: DEFAULT_STREAM_SYMBOL,
+  }),
 });
 
 const kafkaBrokers = env.KAFKA_BROKERS
@@ -39,6 +51,17 @@ const kafkaBrokers = env.KAFKA_BROKERS
 
 if (kafkaBrokers.length === 0) {
   throw new Error('KAFKA_BROKERS must contain at least one broker');
+}
+
+const streamSymbols = parseStreamSymbols(env.STREAM_SYMBOLS);
+const candleProcessorSymbols = parseStreamSymbols(
+  env.CANDLE_PROCESSOR_SYMBOLS,
+);
+
+if (!haveSameSymbols(streamSymbols, candleProcessorSymbols)) {
+  throw new Error(
+    'STREAM_SYMBOLS and CANDLE_PROCESSOR_SYMBOLS must contain the same symbols',
+  );
 }
 
 const config = {
@@ -54,7 +77,7 @@ const config = {
   TWELVE_DATA_API_KEY: env.TWELVE_DATA_API_KEY,
 
   market: {
-    streamSymbols: parseStreamSymbols(env.STREAM_SYMBOLS),
+    streamSymbols,
     historicalBackfillEnabled: env.ENABLE_HISTORICAL_BACKFILL,
   },
 
@@ -69,7 +92,26 @@ const config = {
     brokers: kafkaBrokers,
     rawTicksTopic: env.KAFKA_RAW_TICKS_TOPIC,
     clientId: env.KAFKA_CLIENT_ID,
+    candleConsumerGroup: env.KAFKA_CANDLE_CONSUMER_GROUP,
+    candleConsumerClientId: env.KAFKA_CANDLE_CONSUMER_CLIENT_ID,
+  },
+
+  candleProcessor: {
+    symbols: candleProcessorSymbols,
   },
 } as const;
 
 export default config;
+
+function haveSameSymbols(
+  first: readonly string[],
+  second: readonly string[],
+): boolean {
+  if (first.length !== second.length) {
+    return false;
+  }
+
+  const firstSymbols = new Set(first);
+
+  return second.every((symbol) => firstSymbols.has(symbol));
+}

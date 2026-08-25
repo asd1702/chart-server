@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  createMany: vi.fn(),
   logger: {
     error: vi.fn(),
     info: vi.fn(),
@@ -8,7 +9,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/shared', () => ({
-  prisma: {},
+  prisma: {
+    candle1m: {
+      createMany: mocks.createMany,
+    },
+  },
 }));
 
 vi.mock('../../../src/shared/utils/logger', () => ({
@@ -22,6 +27,7 @@ import { CandleRepository } from '../../../src/modules/candle/candle.repository'
 describe('CandleRepository Continuous Aggregate refresh result', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.createMany.mockResolvedValue({ count: 0 });
   });
 
   it('개별 view 실패 후에도 다음 view를 처리하고 결과를 집계한다', async () => {
@@ -41,5 +47,25 @@ describe('CandleRepository Continuous Aggregate refresh result', () => {
         event: 'continuous_aggregate_view_refresh_failed',
       }),
     );
+  });
+
+  it('replay된 candle을 skipDuplicates로 멱등 저장한다', async () => {
+    const repository = new CandleRepository();
+    const candle = {
+      symbol: 'BTC/USD',
+      time: new Date(60_000),
+      open: 100,
+      high: 110,
+      low: 100,
+      close: 110,
+      volume: 0,
+    };
+
+    await repository.bulkSave1mCandles([candle]);
+
+    expect(mocks.createMany).toHaveBeenCalledWith({
+      data: [candle],
+      skipDuplicates: true,
+    });
   });
 });
