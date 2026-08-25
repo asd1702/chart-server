@@ -13,6 +13,7 @@ vi.mock('../../config', () => ({
   default: {
     market: { streamSymbols: ['BTC/USD'] },
     TWELVE_DATA_API_KEY: 'test-key',
+    TWELVE_DATA_WS_URL: 'wss://ws.twelvedata.com/v1/quotes/price',
   },
 }));
 
@@ -24,6 +25,7 @@ vi.mock('../../shared/utils/logger', () => ({
 
 import {
   buildTwelveDataSubscription,
+  buildTwelveDataWebSocketUrl,
   TwelveDataStream,
 } from './twelvedata.provider';
 
@@ -274,6 +276,22 @@ describe('TwelveData feed ingestion', () => {
 });
 
 describe('TwelveData subscription configuration', () => {
+  it('uses the TwelveData default endpoint and appends the API key', () => {
+    expect(buildTwelveDataWebSocketUrl(
+      'wss://ws.twelvedata.com/v1/quotes/price',
+      'test-key',
+    )).toBe(
+      'wss://ws.twelvedata.com/v1/quotes/price?apikey=test-key',
+    );
+  });
+
+  it('uses a custom synthetic WebSocket endpoint without changing its path', () => {
+    expect(buildTwelveDataWebSocketUrl(
+      'ws://host.docker.internal:8081',
+      'dummy',
+    )).toBe('ws://host.docker.internal:8081/?apikey=dummy');
+  });
+
   it('subscribes only to BTC/USD for the default lab workload', () => {
     expect(buildTwelveDataSubscription(['BTC/USD'])).toEqual({
       action: 'subscribe',

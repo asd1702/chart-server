@@ -40,6 +40,7 @@ services:
       DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://${POSTGRES_USER:-architecture_lab}:${POSTGRES_PASSWORD:-1234}@timescaledb:5432/${POSTGRES_DB:-architecture_lab}?schema=market}
       REDIS_URL: redis://redis:6379
       TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:?TWELVE_DATA_API_KEY is required}
+      TWELVE_DATA_WS_URL: ${TWELVE_DATA_WS_URL:-wss://ws.twelvedata.com/v1/quotes/price}
       STREAM_SYMBOLS: ${STREAM_SYMBOLS:-BTC/USD}
       ENABLE_HISTORICAL_BACKFILL: ${ENABLE_HISTORICAL_BACKFILL:-false}
       LEADER_ELECTION_LOCK_KEY: ${LEADER_ELECTION_LOCK_KEY:-424242}

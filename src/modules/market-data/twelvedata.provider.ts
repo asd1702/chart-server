@@ -172,7 +172,10 @@ export class TwelveDataStream {
     );
 
     const ws = new WebSocket(
-      `wss://ws.twelvedata.com/v1/quotes/price?apikey=${config.TWELVE_DATA_API_KEY}`,
+      buildTwelveDataWebSocketUrl(
+        config.TWELVE_DATA_WS_URL,
+        config.TWELVE_DATA_API_KEY,
+      ),
     );
 
     this.ws = ws;
@@ -468,6 +471,19 @@ export function buildTwelveDataSubscription(
       symbols: symbols.join(','),
     },
   };
+}
+
+export function buildTwelveDataWebSocketUrl(
+  baseUrl: string,
+  apiKey: string,
+): string {
+  const wsUrl = new URL(baseUrl);
+
+  if (apiKey) {
+    wsUrl.searchParams.set('apikey', apiKey);
+  }
+
+  return wsUrl.toString();
 }
 
 async function publishSafely(

@@ -17,6 +17,10 @@ const env = cleanEnv(process.env, {
 
   TWELVE_DATA_API_KEY: str({ default: '' }),
 
+  TWELVE_DATA_WS_URL: str({
+    default: 'wss://ws.twelvedata.com/v1/quotes/price',
+  }),
+
   STREAM_SYMBOLS: str({ default: DEFAULT_STREAM_SYMBOL }),
   ENABLE_HISTORICAL_BACKFILL: bool({ default: false }),
 
@@ -75,6 +79,8 @@ const config = {
   REDIS_URL: env.REDIS_URL,
 
   TWELVE_DATA_API_KEY: env.TWELVE_DATA_API_KEY,
+
+  TWELVE_DATA_WS_URL: env.TWELVE_DATA_WS_URL,
 
   market: {
     streamSymbols,
