@@ -4,6 +4,7 @@ import type { RawTickPublisher } from '../kafka/raw-tick.publisher';
 import { TwelveDataStream } from '../market-data/twelvedata.provider';
 import { createRedisPubSubService } from '../messaging/pubsub.factory';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
+import type { IngestorMetrics } from '../observability/ingestor.metrics';
 import { getErrorMessage, logger } from '../../shared/utils/logger';
 
 const runtimeLogger = logger.child({
@@ -22,6 +23,10 @@ export class ActiveIngestionRuntime {
   private twelveDataStream: TwelveDataStream | null = null;
 
   private running = false;
+
+  constructor(
+    private readonly metrics?: IngestorMetrics,
+  ) {}
 
   isRunning(): boolean {
     return this.running;
@@ -69,6 +74,7 @@ export class ActiveIngestionRuntime {
         {
           symbols: config.market.streamSymbols,
         },
+        this.metrics,
       );
 
       /*

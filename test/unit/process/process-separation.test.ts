@@ -19,6 +19,8 @@ afterEach(() => {
   vi.doUnmock('../../../src/modules/candle/candle.persistence');
   vi.doUnmock('../../../src/modules/coordination/postgres-advisory-leader-election');
   vi.doUnmock('../../../src/modules/ingestion/active-ingestion.runtime');
+  vi.doUnmock('../../../src/modules/observability/ingestor.metrics');
+  vi.doUnmock('../../../src/modules/observability/metrics-server');
   vi.doUnmock('../../../src/shared/db/prisma');
   vi.doUnmock('../../../src/shared/utils/logger');
   vi.resetModules();
@@ -104,12 +106,26 @@ describe('process separation startup', () => {
           lockKey: 424242,
           retryIntervalMs: 1000,
         },
+        observability: {
+          ingestorMetricsPort: 9464,
+        },
       },
     }));
     vi.doMock('../../../src/modules/ingestion/active-ingestion.runtime', () => ({
       ActiveIngestionRuntime: class {
         start = activeRuntimeStart;
         stop = activeRuntimeStop;
+      },
+    }));
+    vi.doMock('../../../src/modules/observability/ingestor.metrics', () => ({
+      IngestorMetrics: class {
+        registry = {};
+      },
+    }));
+    vi.doMock('../../../src/modules/observability/metrics-server', () => ({
+      MetricsServer: class {
+        start = vi.fn().mockResolvedValue(undefined);
+        stop = vi.fn().mockResolvedValue(undefined);
       },
     }));
     vi.doMock('../../../src/modules/coordination/postgres-advisory-leader-election', () => ({
@@ -187,6 +203,9 @@ describe('process separation startup', () => {
           lockKey: 424242,
           retryIntervalMs: 1000,
         },
+        observability: {
+          ingestorMetricsPort: 9464,
+        },
       },
     }));
 
@@ -199,6 +218,17 @@ describe('process separation startup', () => {
         },
       }),
     );
+    vi.doMock('../../../src/modules/observability/ingestor.metrics', () => ({
+      IngestorMetrics: class {
+        registry = {};
+      },
+    }));
+    vi.doMock('../../../src/modules/observability/metrics-server', () => ({
+      MetricsServer: class {
+        start = vi.fn().mockResolvedValue(undefined);
+        stop = vi.fn().mockResolvedValue(undefined);
+      },
+    }));
 
     vi.doMock(
       '../../../src/modules/coordination/postgres-advisory-leader-election',

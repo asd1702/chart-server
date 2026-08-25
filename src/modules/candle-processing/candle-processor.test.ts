@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Registry } from 'prom-client';
+import { CandleProcessorMetrics } from '../observability/candle-processor.metrics';
 
 const mocks = vi.hoisted(() => ({
   commitOffset: vi.fn(),
@@ -44,11 +46,13 @@ describe('CandleProcessor pure replay checkpointing', () => {
 
   function createProcessor(
     symbols: readonly string[] = ['BTC/USD'],
+    metrics?: CandleProcessorMetrics,
   ): CandleProcessor {
     return new CandleProcessor(
       symbols,
       { bulkSave1mCandles: mocks.bulkSave1mCandles },
       { commitOffset: mocks.commitOffset },
+      metrics,
     );
   }
 
@@ -276,5 +280,74 @@ describe('CandleProcessor pure replay checkpointing', () => {
 
     expect(mocks.bulkSave1mCandles).not.toHaveBeenCalled();
     expect(mocks.commitOffset).not.toHaveBeenCalled();
+  });
+
+  it('records the global safe watermark and replay exposure only after commit success', async () => {
+    const metrics = new CandleProcessorMetrics(new Registry());
+    const processor = createProcessor(['BTC/USD', 'ETH/USD'], metrics);
+
+    await processor.process(rawMessage('10', 60, 100, 'BTC/USD'));
+    await processor.process(rawMessage('11', 60, 200, 'ETH/USD'));
+    await processor.process(rawMessage('20', 120, 110, 'BTC/USD'));
+
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_processed_offset'),
+    ).resolves.toContain('candle_processed_offset{topic="market.raw-ticks",partition="0"} 20');
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_safe_replay_offset'),
+    ).resolves.toContain('candle_safe_replay_offset{topic="market.raw-ticks",partition="0"} 11');
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_replay_exposure'),
+    ).resolves.toContain('candle_replay_exposure{topic="market.raw-ticks",partition="0"} 9');
+    await expect(
+      metrics.registry.getSingleMetricAsString(
+        'candle_symbol_replay_start_offset',
+      ),
+    ).resolves.toContain('candle_symbol_replay_start_offset{topic="market.raw-ticks",partition="0",symbol="ETH/USD"} 11');
+
+    await processor.process(rawMessage('21', 121, 111, 'BTC/USD'));
+
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_processed_offset'),
+    ).resolves.toContain('candle_processed_offset{topic="market.raw-ticks",partition="0"} 21');
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_replay_exposure'),
+    ).resolves.toContain('candle_replay_exposure{topic="market.raw-ticks",partition="0"} 10');
+  });
+
+  it('does not advance safe replay metrics when DB or offset commit fails', async () => {
+    const metrics = new CandleProcessorMetrics(new Registry());
+    const processor = createProcessor(['BTC/USD'], metrics);
+
+    await processor.process(rawMessage('100', 60, 100));
+    mocks.bulkSave1mCandles.mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+
+    await expect(
+      processor.process(rawMessage('150', 120, 105)),
+    ).rejects.toThrow('database unavailable');
+
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_db_write_failures_total'),
+    ).resolves.toContain('candle_db_write_failures_total{symbol="BTC/USD"} 1');
+    await expect(
+      metrics.registry.getSingleMetricAsString('candle_safe_replay_offset'),
+    ).resolves.not.toContain('candle_safe_replay_offset{');
+
+    mocks.bulkSave1mCandles.mockResolvedValue(1);
+    mocks.commitOffset.mockRejectedValueOnce(
+      new Error('Kafka commit failure'),
+    );
+
+    await expect(
+      processor.process(rawMessage('151', 180, 106)),
+    ).rejects.toThrow('Kafka commit failure');
+
+    await expect(
+      metrics.registry.getSingleMetricAsString(
+        'candle_offset_commit_failures_total',
+      ),
+    ).resolves.toContain('candle_offset_commit_failures_total 1');
   });
 });

@@ -5,6 +5,7 @@ import type {
   ConsumedRawTick,
   RawTickOffsetCommitter,
 } from '../kafka/raw-tick.consumer';
+import type { CandleProcessorMetrics } from '../observability/candle-processor.metrics';
 import { logger } from '../../shared/utils/logger';
 
 const processorLogger = logger.child({
@@ -49,6 +50,7 @@ export class CandleProcessor {
     symbols: readonly string[],
     private readonly repository: CandleWriter,
     private readonly offsetCommitter: RawTickOffsetCommitter,
+    private readonly metrics?: CandleProcessorMetrics,
   ) {
     this.symbols = new Set(symbols);
 
@@ -77,6 +79,12 @@ export class CandleProcessor {
 
     if (!this.replayStartOffsets.has(tick.symbol)) {
       this.replayStartOffsets.set(tick.symbol, replayStartOffset);
+      this.metrics?.recordCurrentReplayStart(
+        tick.symbol,
+        topic,
+        partition,
+        replayStartOffset,
+      );
     }
 
     const candleMaker = this.getCandleMaker(tick.symbol);
@@ -92,6 +100,13 @@ export class CandleProcessor {
        * No checkpoint while constructing a minute. Replaying from the last
        * completed-minute boundary reconstructs this in-memory candle.
        */
+      this.metrics?.recordProcessedTick(
+        tick.symbol,
+        topic,
+        partition,
+        replayStartOffset,
+      );
+
       return {
         completedCandle: null,
       };
@@ -107,7 +122,16 @@ export class CandleProcessor {
       volume: completed.volume,
     };
 
-    await this.repository.bulkSave1mCandles([candle]);
+    const endDbWrite = this.metrics?.startDbWrite(tick.symbol);
+
+    try {
+      await this.repository.bulkSave1mCandles([candle]);
+    } catch (error) {
+      this.metrics?.recordDbWriteFailure(tick.symbol);
+      throw error;
+    } finally {
+      endDbWrite?.();
+    }
 
     /*
      * The boundary tick completed the previous candle and started this
@@ -117,10 +141,24 @@ export class CandleProcessor {
 
     const safeReplayOffset = this.getSafeReplayOffset();
 
-    await this.offsetCommitter.commitOffset({
+    try {
+      await this.offsetCommitter.commitOffset({
+        topic,
+        partition,
+        offset: safeReplayOffset.toString(),
+      });
+    } catch (error) {
+      this.metrics?.recordOffsetCommitFailure();
+      throw error;
+    }
+
+    this.metrics?.recordCommittedBoundary({
+      symbol: tick.symbol,
       topic,
       partition,
-      offset: safeReplayOffset.toString(),
+      processedOffset: replayStartOffset,
+      safeReplayOffset,
+      replayStartOffsets: this.replayStartOffsets,
     });
 
     processorLogger.info('완성된 candle의 replay checkpoint를 기록했습니다.', {

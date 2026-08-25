@@ -5,6 +5,8 @@ import { CandleRepository } from './modules/candle/candle.repository';
 import { KafkaRawTickConsumer } from './modules/kafka/kafka-raw-tick.consumer';
 import { createRedisPubSubService } from './modules/messaging/pubsub.factory';
 import type { MarketEventPublisher } from './modules/messaging/pubsub.interface';
+import { CandleProcessorMetrics } from './modules/observability/candle-processor.metrics';
+import { MetricsServer } from './modules/observability/metrics-server';
 import { prisma } from './shared/db/prisma';
 import {
   getErrorMessage,
@@ -27,6 +29,11 @@ export async function startCandleProcessor(): Promise<void> {
   });
 
   const publisher = createRedisPubSubService('publisher');
+  const metrics = new CandleProcessorMetrics();
+  const metricsServer = new MetricsServer(
+    config.observability.candleProcessorMetricsPort,
+    metrics.registry,
+  );
   const consumer = new KafkaRawTickConsumer(
     [...config.kafka.brokers],
     config.kafka.rawTicksTopic,
@@ -37,6 +44,7 @@ export async function startCandleProcessor(): Promise<void> {
     config.candleProcessor.symbols,
     new CandleRepository(),
     consumer,
+    metrics,
   );
   const runtime = new CandleProcessingRuntime(
     consumer,
@@ -55,11 +63,13 @@ export async function startCandleProcessor(): Promise<void> {
     },
   );
 
-  installShutdownHandlers(runtime, publisher);
+  installShutdownHandlers(runtime, publisher, metricsServer);
 
   try {
+    await metricsServer.start();
     await runtime.start();
   } catch (error) {
+    await metricsServer.stop().catch(() => undefined);
     await publisher.disconnect().catch(() => undefined);
     throw error;
   }
@@ -72,6 +82,7 @@ export async function startCandleProcessor(): Promise<void> {
 function installShutdownHandlers(
   runtime: CandleProcessingRuntime,
   publisher: MarketEventPublisher,
+  metricsServer: MetricsServer,
 ): void {
   let isShuttingDown = false;
 
@@ -91,6 +102,12 @@ function installShutdownHandlers(
 
     try {
       await runtime.stop();
+    } catch (error) {
+      firstError ??= error;
+    }
+
+    try {
+      await metricsServer.stop();
     } catch (error) {
       firstError ??= error;
     }
