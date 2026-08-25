@@ -2,14 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   calls: [] as string[],
-  startCandlePersistence: vi.fn(),
-  closeCandlePersistence: vi.fn(),
   createRedisPublisher: vi.fn(),
   kafkaStart: vi.fn(),
   kafkaStop: vi.fn(),
   streamStart: vi.fn(),
   streamStop: vi.fn(),
-  runHistoricalBackfill: vi.fn(),
   logger: {
     info: vi.fn(),
     error: vi.fn(),
@@ -28,11 +25,6 @@ vi.mock('../../config', () => ({
       historicalBackfillEnabled: false,
     },
   },
-}));
-
-vi.mock('../candle/candle.persistence', () => ({
-  startCandlePersistence: mocks.startCandlePersistence,
-  closeCandlePersistence: mocks.closeCandlePersistence,
 }));
 
 vi.mock('../messaging/pubsub.factory', () => ({
@@ -62,10 +54,6 @@ vi.mock('../market-data/twelvedata.provider', () => ({
   },
 }));
 
-vi.mock('../market-data/historical-backfill.service', () => ({
-  runHistoricalBackfill: mocks.runHistoricalBackfill,
-}));
-
 vi.mock('../../shared/utils/logger', () => ({
   getErrorMessage: (error: unknown) => error instanceof Error ? error.message : 'Unknown error',
   logger: { child: vi.fn(() => mocks.logger) },
@@ -78,12 +66,6 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
     vi.clearAllMocks();
     mocks.calls.length = 0;
 
-    mocks.startCandlePersistence.mockImplementation(() => {
-      mocks.calls.push('candle-persistence-start');
-    });
-    mocks.closeCandlePersistence.mockImplementation(async () => {
-      mocks.calls.push('candle-persistence-stop');
-    });
     mocks.kafkaStart.mockImplementation(async () => {
       mocks.calls.push('kafka-start');
     });
@@ -96,7 +78,6 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
     mocks.streamStop.mockImplementation(async () => {
       mocks.calls.push('stream-stop');
     });
-    mocks.runHistoricalBackfill.mockResolvedValue(undefined);
     mocks.createRedisPublisher.mockImplementation(() => {
       mocks.calls.push('redis-created');
       return {
@@ -108,7 +89,7 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
     });
   });
 
-  it('connects Kafka before opening TwelveData and disconnects it after stream handlers settle', async () => {
+  it('starts Redis, Kafka, and TwelveData then stops them in reverse dependency order', async () => {
     const runtime = new ActiveIngestionRuntime();
 
     await runtime.start();
@@ -116,19 +97,17 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
 
     expect(mocks.calls).toEqual([
       'redis-created',
-      'candle-persistence-start',
       'kafka-created',
       'kafka-start',
       'stream-created',
       'stream-start',
       'stream-stop',
       'kafka-stop',
-      'candle-persistence-stop',
       'redis-stop',
     ]);
   });
 
-  it('cleans Kafka, persistence, and Redis when Kafka connection fails', async () => {
+  it('cleans Kafka and Redis when Kafka connection fails', async () => {
     mocks.kafkaStart.mockRejectedValueOnce(new Error('Kafka unavailable'));
     const runtime = new ActiveIngestionRuntime();
 
@@ -136,10 +115,8 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
 
     expect(mocks.calls).toEqual([
       'redis-created',
-      'candle-persistence-start',
       'kafka-created',
       'kafka-stop',
-      'candle-persistence-stop',
       'redis-stop',
     ]);
     expect(mocks.streamStart).not.toHaveBeenCalled();
@@ -156,14 +133,12 @@ describe('ActiveIngestionRuntime Kafka lifecycle', () => {
 
     expect(mocks.calls).toEqual([
       'redis-created',
-      'candle-persistence-start',
       'kafka-created',
       'kafka-start',
       'stream-created',
       'stream-start',
       'stream-stop',
       'kafka-stop',
-      'candle-persistence-stop',
       'redis-stop',
     ]);
   });

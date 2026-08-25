@@ -1,7 +1,5 @@
 import WebSocket from 'ws';
 import config from '../../config';
-import { CandleMaker } from '../candle/candle.maker';
-import { enqueueCandle } from '../candle/candle.persistence';
 import type { RawTickPublisher } from '../kafka/raw-tick.publisher';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
 import { getErrorMessage, logger } from '../../shared/utils/logger';
@@ -21,9 +19,7 @@ export class TwelveDataStream {
   private readonly publisher: MarketEventPublisher;
   private readonly rawTickPublisher: RawTickPublisher;
   private readonly symbols: readonly string[];
-
-  private readonly candleMakers =
-    new Map<string, CandleMaker>();
+  private readonly symbolSet: ReadonlySet<string>;
 
   private readonly activeMessageHandlers =
     new Set<Promise<void>>();
@@ -49,13 +45,7 @@ export class TwelveDataStream {
     this.publisher = publisher;
     this.rawTickPublisher = rawTickPublisher;
     this.symbols = [...options.symbols];
-
-    for (const symbol of this.symbols) {
-      this.candleMakers.set(
-        symbol,
-        new CandleMaker(),
-      );
-    }
+    this.symbolSet = new Set(this.symbols);
   }
 
   start(): void {
@@ -94,9 +84,12 @@ export class TwelveDataStream {
     price: number,
     timestamp: number,
   ): Promise<void> {
-    const maker = this.candleMakers.get(symbol);
-
-    if (!maker) {
+    if (!this.symbolSet.has(symbol)) {
+      logger.warn('구독되지 않은 TwelveData 심볼 tick을 무시했습니다.', {
+        subsystem: 'twelvedata-websocket',
+        event: 'twelvedata_unconfigured_symbol',
+        symbol,
+      });
       return;
     }
 
@@ -109,31 +102,17 @@ export class TwelveDataStream {
       source: 'twelvedata',
     };
 
-    const completedCandle =
-      await this.runSymbolDurablePhase(
-        symbol,
-        async () => {
-          /*
-           * Kafka acknowledgement is the admission gate for the legacy path.
-           * A tick that did not reach the durable raw log must not mutate the
-           * epoch-local CandleMaker state or reach RocksDB/Redis.
-           */
-          await this.rawTickPublisher.publish(rawTick);
-
-          const completed = maker.update(
-            symbol,
-            price,
-            0,
-            timestamp,
-          );
-
-          if (completed) {
-            await enqueueCandle(completed);
-          }
-
-          return completed;
-        },
-      );
+    /*
+     * Kafka acknowledgement is the admission gate for a realtime tick.
+     * Keep same-symbol producer sends serialized, but never include Redis in
+     * this durable section.
+     */
+    await this.runSymbolDurablePhase(
+      symbol,
+      async () => {
+        await this.rawTickPublisher.publish(rawTick);
+      },
+    );
 
     // Tick은 durability 대상이 아닌
     // best-effort realtime event다.
@@ -146,31 +125,6 @@ export class TwelveDataStream {
         timestamp,
       },
     );
-
-    if (completedCandle) {
-      // RocksDB enqueue 성공 후에만
-      // candle realtime event를 발행한다.
-      await publishSafely(
-        this.publisher,
-        {
-          type: 'candle',
-          timeframe: '1m',
-          candle: completedCandle,
-        },
-      );
-
-      logger.debug(
-        '1분 캔들이 완성되었습니다.',
-        {
-          subsystem: 'twelvedata-websocket',
-          event: 'candle_completed',
-          symbol,
-          time: new Date(
-            completedCandle.startTime * 1000,
-          ).toISOString(),
-        },
-      );
-    }
   }
 
   private runSymbolDurablePhase<T>(
@@ -218,7 +172,10 @@ export class TwelveDataStream {
     );
 
     const ws = new WebSocket(
-      `wss://ws.twelvedata.com/v1/quotes/price?apikey=${config.TWELVE_DATA_API_KEY}`,
+      buildTwelveDataWebSocketUrl(
+        config.TWELVE_DATA_WS_URL,
+        config.TWELVE_DATA_API_KEY,
+      ),
     );
 
     this.ws = ws;
@@ -514,6 +471,19 @@ export function buildTwelveDataSubscription(
       symbols: symbols.join(','),
     },
   };
+}
+
+export function buildTwelveDataWebSocketUrl(
+  baseUrl: string,
+  apiKey: string,
+): string {
+  const wsUrl = new URL(baseUrl);
+
+  if (apiKey) {
+    wsUrl.searchParams.set('apikey', apiKey);
+  }
+
+  return wsUrl.toString();
 }
 
 async function publishSafely(
