@@ -1,0 +1,108 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "panels": [
+    {
+      "title": "Raw Tick Input Rate",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum by (symbol) (rate(market_raw_ticks_received_total[1m]))", "legendFormat": "{{symbol}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "title": "Kafka ACK Rate",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum by (symbol) (rate(market_raw_ticks_kafka_acked_total[1m]))", "legendFormat": "{{symbol}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "title": "Kafka Publish Latency",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(market_kafka_publish_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(market_kafka_publish_duration_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(market_kafka_publish_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "title": "Candle Processing Rate",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum by (symbol) (rate(candle_ticks_processed_total[1m]))", "legendFormat": "{{symbol}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    },
+    {
+      "title": "TimescaleDB Write Latency",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(candle_db_write_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(candle_db_write_duration_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(candle_db_write_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "title": "Processed Offset vs Safe Replay Offset",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "candle_processed_offset", "legendFormat": "processed {{topic}}/{{partition}}" },
+        { "expr": "candle_safe_replay_offset", "legendFormat": "safe {{topic}}/{{partition}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "title": "Replay Exposure (records)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "candle_replay_exposure", "legendFormat": "{{topic}}/{{partition}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }
+    },
+    {
+      "title": "Per-symbol Replay Start Offset",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "candle_symbol_replay_start_offset", "legendFormat": "{{symbol}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 }
+    },
+    {
+      "title": "Failure Counters",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum by (symbol) (rate(market_raw_ticks_kafka_failed_total[5m]))", "legendFormat": "Kafka publish {{symbol}}" },
+        { "expr": "sum by (symbol) (rate(candle_db_write_failures_total[5m]))", "legendFormat": "DB write {{symbol}}" },
+        { "expr": "rate(candle_offset_commit_failures_total[5m])", "legendFormat": "offset commit" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 }
+    },
+    {
+      "title": "Node CPU Usage",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(process_cpu_user_seconds_total[1m]) + rate(process_cpu_system_seconds_total[1m])", "legendFormat": "{{job}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 }
+    },
+    {
+      "title": "Node RSS Memory",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "process_resident_memory_bytes", "legendFormat": "{{job}}" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 }
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": ["kafka", "pure-replay", "architecture-lab"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "Chart Server - Pure Replay",
+  "uid": "chart-server-pure-replay",
+  "version": 1
+}

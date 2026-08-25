@@ -49,6 +49,9 @@ services:
       KAFKA_RAW_TICKS_TOPIC: market.raw-ticks
       KAFKA_CLIENT_ID: market-feed-ingestor
       CANDLE_PROCESSOR_SYMBOLS: ${CANDLE_PROCESSOR_SYMBOLS:-BTC/USD}
+      INGESTOR_METRICS_PORT: 9464
+    expose:
+      - "9464"
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -102,6 +105,9 @@ services:
       KAFKA_CANDLE_CONSUMER_CLIENT_ID: candle-processor
       STREAM_SYMBOLS: ${STREAM_SYMBOLS:-BTC/USD}
       CANDLE_PROCESSOR_SYMBOLS: ${CANDLE_PROCESSOR_SYMBOLS:-BTC/USD}
+      CANDLE_PROCESSOR_METRICS_PORT: 9465
+    expose:
+      - "9465"
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -109,6 +115,35 @@ services:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - market-ingestor
+      - candle-processor
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
   kafka:
@@ -168,3 +203,4 @@ volumes:
   timescale-data:
   redis-data:
   kafka-data:
+  prometheus-data:

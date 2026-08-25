@@ -1,6 +1,8 @@
 import config from './config';
 import { LeaderElectionService } from './modules/coordination/postgres-advisory-leader-election';
 import { ActiveIngestionRuntime } from './modules/ingestion/active-ingestion.runtime';
+import { IngestorMetrics } from './modules/observability/ingestor.metrics';
+import { MetricsServer } from './modules/observability/metrics-server';
 import { prisma } from './shared/db/prisma';
 import {
   getErrorMessage,
@@ -31,8 +33,12 @@ export async function startMarketIngestor(): Promise<void> {
     },
   );
 
-  const activeRuntime =
-    new ActiveIngestionRuntime();
+  const metrics = new IngestorMetrics();
+  const metricsServer = new MetricsServer(
+    config.observability.ingestorMetricsPort,
+    metrics.registry,
+  );
+  const activeRuntime = new ActiveIngestionRuntime(metrics);
 
   const leaderElection =
     new LeaderElectionService({
@@ -103,9 +109,16 @@ export async function startMarketIngestor(): Promise<void> {
   installShutdownHandlers(
     activeRuntime,
     leaderElection,
+    metricsServer,
   );
 
-  await leaderElection.start();
+  try {
+    await metricsServer.start();
+    await leaderElection.start();
+  } catch (error) {
+    await metricsServer.stop().catch(() => undefined);
+    throw error;
+  }
 
   ingestorLogger.info(
     'Market Ingestor leader election을 시작했습니다.',
@@ -118,6 +131,7 @@ export async function startMarketIngestor(): Promise<void> {
 function installShutdownHandlers(
   activeRuntime: ActiveIngestionRuntime,
   leaderElection: LeaderElectionService,
+  metricsServer: MetricsServer,
 ): void {
   let isShuttingDown = false;
 
@@ -165,6 +179,12 @@ function installShutdownHandlers(
      */
     try {
       await activeRuntime.stop();
+    } catch (error) {
+      firstError ??= error;
+    }
+
+    try {
+      await metricsServer.stop();
     } catch (error) {
       firstError ??= error;
     }

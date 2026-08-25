@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Registry } from 'prom-client';
+import { IngestorMetrics } from '../observability/ingestor.metrics';
 
 const mocks = vi.hoisted(() => ({
   logger: {
@@ -248,6 +250,43 @@ describe('TwelveData feed ingestion', () => {
       receivedAtMs: expect.any(Number),
       source: 'twelvedata',
     });
+  });
+
+  it('records received, Kafka ACK, and Kafka failure metrics without changing admission behavior', async () => {
+    const metrics = new IngestorMetrics(new Registry());
+    const rawTickPublisher = createRawTickPublisher();
+    const stream = new TwelveDataStream(
+      createPublisher(),
+      rawTickPublisher,
+      { symbols: ['BTC/USD'] },
+      metrics,
+    );
+
+    await stream.handlePriceUpdate('BTC/USD', 100, 60);
+
+    rawTickPublisher.publish.mockRejectedValueOnce(
+      new Error('Kafka unavailable'),
+    );
+
+    await expect(
+      stream.handlePriceUpdate('BTC/USD', 101, 61),
+    ).rejects.toThrow('Kafka unavailable');
+
+    await expect(
+      metrics.registry.getSingleMetricAsString(
+        'market_raw_ticks_received_total',
+      ),
+    ).resolves.toContain('market_raw_ticks_received_total{symbol="BTC/USD"} 2');
+    await expect(
+      metrics.registry.getSingleMetricAsString(
+        'market_raw_ticks_kafka_acked_total',
+      ),
+    ).resolves.toContain('market_raw_ticks_kafka_acked_total{symbol="BTC/USD"} 1');
+    await expect(
+      metrics.registry.getSingleMetricAsString(
+        'market_raw_ticks_kafka_failed_total',
+      ),
+    ).resolves.toContain('market_raw_ticks_kafka_failed_total{symbol="BTC/USD"} 1');
   });
 
   it('drops a tick for a symbol that is not configured for this feed', async () => {

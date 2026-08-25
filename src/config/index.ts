@@ -21,6 +21,9 @@ const env = cleanEnv(process.env, {
     default: 'wss://ws.twelvedata.com/v1/quotes/price',
   }),
 
+  INGESTOR_METRICS_PORT: port({ default: 9464 }),
+  CANDLE_PROCESSOR_METRICS_PORT: port({ default: 9465 }),
+
   STREAM_SYMBOLS: str({ default: DEFAULT_STREAM_SYMBOL }),
   ENABLE_HISTORICAL_BACKFILL: bool({ default: false }),
 
@@ -81,6 +84,11 @@ const config = {
   TWELVE_DATA_API_KEY: env.TWELVE_DATA_API_KEY,
 
   TWELVE_DATA_WS_URL: env.TWELVE_DATA_WS_URL,
+
+  observability: {
+    ingestorMetricsPort: env.INGESTOR_METRICS_PORT,
+    candleProcessorMetricsPort: env.CANDLE_PROCESSOR_METRICS_PORT,
+  },
 
   market: {
     streamSymbols,

@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import config from '../../config';
 import type { RawTickPublisher } from '../kafka/raw-tick.publisher';
 import type { MarketEventPublisher } from '../messaging/pubsub.interface';
+import type { IngestorMetrics } from '../observability/ingestor.metrics';
 import { getErrorMessage, logger } from '../../shared/utils/logger';
 import type { TwelveDataSubscription } from './market-data.types';
 import type { RawMarketTick } from './raw-market-tick';
@@ -41,6 +42,7 @@ export class TwelveDataStream {
     publisher: MarketEventPublisher,
     rawTickPublisher: RawTickPublisher,
     options: TwelveDataStreamOptions,
+    private readonly metrics?: IngestorMetrics,
   ) {
     this.publisher = publisher;
     this.rawTickPublisher = rawTickPublisher;
@@ -102,6 +104,8 @@ export class TwelveDataStream {
       source: 'twelvedata',
     };
 
+    this.metrics?.recordRawTickReceived(symbol);
+
     /*
      * Kafka acknowledgement is the admission gate for a realtime tick.
      * Keep same-symbol producer sends serialized, but never include Redis in
@@ -110,7 +114,17 @@ export class TwelveDataStream {
     await this.runSymbolDurablePhase(
       symbol,
       async () => {
-        await this.rawTickPublisher.publish(rawTick);
+        const endKafkaPublish = this.metrics?.startKafkaPublish(symbol);
+
+        try {
+          await this.rawTickPublisher.publish(rawTick);
+          this.metrics?.recordKafkaAcknowledged(symbol);
+        } catch (error) {
+          this.metrics?.recordKafkaFailed(symbol);
+          throw error;
+        } finally {
+          endKafkaPublish?.();
+        }
       },
     );
 
