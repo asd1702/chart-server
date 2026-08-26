@@ -25,7 +25,7 @@ export class TwelveDataStream {
   private readonly activeMessageHandlers =
     new Set<Promise<void>>();
 
-  private readonly symbolDurableTails =
+  private readonly symbolRealtimeTails =
     new Map<string, Promise<void>>();
 
   private ws: WebSocket | null = null;
@@ -106,47 +106,60 @@ export class TwelveDataStream {
 
     this.metrics?.recordRawTickReceived(symbol);
 
+    const endKafkaPublish = this.metrics?.startKafkaPublish(symbol);
+
     /*
-     * Kafka acknowledgement is the admission gate for a realtime tick.
-     * Keep same-symbol producer sends serialized, but never include Redis in
-     * this durable section.
+     * Do not serialize Kafka admission in the application. The idempotent
+     * producer owns same-partition ordering while each send can be in flight.
      */
-    await this.runSymbolDurablePhase(
+    const kafkaAdmission = this.rawTickPublisher
+      .publish(rawTick)
+      .then(() => {
+        this.metrics?.recordKafkaAcknowledged(symbol);
+      })
+      .catch((error: unknown) => {
+        this.metrics?.recordKafkaFailed(symbol);
+        throw error;
+      })
+      .finally(() => {
+        endKafkaPublish?.();
+      });
+
+    /*
+     * A later same-symbol realtime tail can delay awaiting this promise.
+     * Observe rejection immediately, while retaining kafkaAdmission's
+     * rejected state for the realtime phase and its caller.
+     */
+    void kafkaAdmission.catch(() => undefined);
+
+    /*
+     * Redis is ephemeral but client-visible. Keep its same-symbol order while
+     * leaving Kafka producer sends pipelined and independent from Redis RTT.
+     */
+    await this.runSymbolRealtimePhase(
       symbol,
       async () => {
-        const endKafkaPublish = this.metrics?.startKafkaPublish(symbol);
+        await kafkaAdmission;
 
-        try {
-          await this.rawTickPublisher.publish(rawTick);
-          this.metrics?.recordKafkaAcknowledged(symbol);
-        } catch (error) {
-          this.metrics?.recordKafkaFailed(symbol);
-          throw error;
-        } finally {
-          endKafkaPublish?.();
-        }
-      },
-    );
-
-    // Tick은 durability 대상이 아닌
-    // best-effort realtime event다.
-    await publishSafely(
-      this.publisher,
-      {
-        type: 'tick',
-        symbol,
-        price,
-        timestamp,
+        await publishSafely(
+          this.publisher,
+          {
+            type: 'tick',
+            symbol,
+            price,
+            timestamp,
+          },
+        );
       },
     );
   }
 
-  private runSymbolDurablePhase<T>(
+  private runSymbolRealtimePhase<T>(
     symbol: string,
     operation: () => Promise<T>,
   ): Promise<T> {
     const previousTail =
-      this.symbolDurableTails.get(symbol)
+      this.symbolRealtimeTails.get(symbol)
       ?? Promise.resolve();
 
     const result = previousTail.then(operation);
@@ -161,11 +174,11 @@ export class TwelveDataStream {
       () => undefined,
     );
 
-    this.symbolDurableTails.set(symbol, currentTail);
+    this.symbolRealtimeTails.set(symbol, currentTail);
 
     return result.finally(() => {
-      if (this.symbolDurableTails.get(symbol) === currentTail) {
-        this.symbolDurableTails.delete(symbol);
+      if (this.symbolRealtimeTails.get(symbol) === currentTail) {
+        this.symbolRealtimeTails.delete(symbol);
       }
     });
   }

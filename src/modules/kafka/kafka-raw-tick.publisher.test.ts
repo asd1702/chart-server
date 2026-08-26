@@ -62,6 +62,7 @@ describe('KafkaRawTickPublisher', () => {
       kafkaJS: {
         acks: -1,
         idempotent: true,
+        maxInFlightRequests: 5,
         allowAutoTopicCreation: false,
       },
     });
