@@ -145,7 +145,7 @@ describe('TwelveData feed ingestion', () => {
     await Promise.all([first, second]);
   });
 
-  it('serializes Kafka durable admission for the same symbol', async () => {
+  it('pipelines Kafka durable admission for the same symbol', async () => {
     const firstKafkaAck = createDeferred();
     const calls: string[] = [];
     const rawTickPublisher = createRawTickPublisher();
@@ -171,16 +171,68 @@ describe('TwelveData feed ingestion', () => {
     });
 
     const second = stream.handlePriceUpdate('BTC/USD', 101, 120);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledTimes(2);
+    });
+
+    expect(calls).toContain('kafka:B:start');
+    expect(calls).not.toContain('kafka:A:ack');
+
+    firstKafkaAck.resolve();
+    await Promise.all([first, second]);
+  });
+
+  it('preserves same-symbol Redis order when Kafka admissions complete out of order', async () => {
+    const firstKafkaAck = createDeferred();
+    const rawTickPublisher = createRawTickPublisher();
+    rawTickPublisher.publish
+      .mockImplementationOnce(async () => {
+        await firstKafkaAck.promise;
+      })
+      .mockResolvedValueOnce(undefined);
+    const publisher = createPublisher();
+    const stream = new TwelveDataStream(
+      publisher,
+      rawTickPublisher,
+      { symbols: ['BTC/USD'] },
+    );
+
+    const first = stream.handlePriceUpdate('BTC/USD', 100, 60);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledOnce();
+    });
+
+    const second = stream.handlePriceUpdate('BTC/USD', 101, 61);
+
+    await vi.waitFor(() => {
+      expect(rawTickPublisher.publish).toHaveBeenCalledTimes(2);
+    });
+
     await Promise.resolve();
 
-    expect(rawTickPublisher.publish).toHaveBeenCalledOnce();
+    expect(publisher.publish).not.toHaveBeenCalled();
 
     firstKafkaAck.resolve();
     await Promise.all([first, second]);
 
-    expect(calls.indexOf('kafka:A:ack')).toBeLessThan(
-      calls.indexOf('kafka:B:start'),
-    );
+    expect(publisher.publish.mock.calls.map(
+      ([message]) => message,
+    )).toEqual([
+      {
+        type: 'tick',
+        symbol: 'BTC/USD',
+        price: 100,
+        timestamp: 60,
+      },
+      {
+        type: 'tick',
+        symbol: 'BTC/USD',
+        price: 101,
+        timestamp: 61,
+      },
+    ]);
   });
 
   it('does not serialize Kafka durable admission across different symbols', async () => {

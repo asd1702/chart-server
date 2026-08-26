@@ -25,6 +25,7 @@ export class KafkaRawTickPublisher implements RawTickPublisher {
       kafkaJS: {
         acks: -1,
         idempotent: true,
+        maxInFlightRequests: 5,
         allowAutoTopicCreation: false,
       },
     });
